@@ -1,0 +1,92 @@
+From 39aca4fb7bd1e3f5b3e1ca5e3960209173aa392e Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:17:23 +0900
+Subject: [PATCH] =?UTF-8?q?chore:=20FrameBudget=20=EC=83=88=20=ED=8C=8C?=
+ =?UTF-8?q?=EC=9D=BC=EC=9D=98=20=EC=A0=80=EC=9E=91=EA=B6=8C=EC=9E=90=20?=
+ =?UTF-8?q?=ED=91=9C=EA=B8=B0=20=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+새로 작성한 파일에 Chromium 템플릿의 "The Chromium Authors"가 그대로 들어가 있었다.
+직접 작성한 파일이므로 저작권자를 WieHyunSeo로 바꾼다. 라이선스(BSD-3-Clause)는 그대로다.
+---
+ chrome/browser/ui/framebudget/BUILD.gn                  | 2 +-
+ chrome/browser/ui/framebudget/framebudget_policy.cc     | 2 +-
+ chrome/browser/ui/framebudget/framebudget_policy.h      | 2 +-
+ chrome/browser/ui/framebudget/framebudget_tab_helper.cc | 2 +-
+ chrome/browser/ui/framebudget/framebudget_tab_helper.h  | 2 +-
+ chrome/browser/ui/framebudget/framebudget_ui.cc         | 2 +-
+ chrome/browser/ui/framebudget/framebudget_ui.h          | 2 +-
+ 7 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index 0f647a2bbe..cd9f322582 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -1,4 +1,4 @@
+-# Copyright 2026 The Chromium Authors
++# Copyright 2026 WieHyunSeo
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index 0b60d48238..63a0c2dbc9 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 6018c33685..1de301dd3c 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index bd049e11cd..66a76ac68f 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 1fae7a2d0f..72f8e62b37 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 65a25fdd5d..03ddf33f2b 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.h b/chrome/browser/ui/framebudget/framebudget_ui.h
+index 5f8ae6cb12..e2c01a68fe 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.h
++++ b/chrome/browser/ui/framebudget/framebudget_ui.h
+@@ -1,4 +1,4 @@
+-// Copyright 2026 The Chromium Authors
++// Copyright 2026 WieHyunSeo
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 

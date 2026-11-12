@@ -17,13 +17,14 @@ FrameBudget 기능은 Chromium 원본 소스에 적용하는 패치로 제공합
 | 0004 | 수정: 첫 빌드의 `framebudget_tab_helper.cc` 컴파일 오류 2건 |
 | 0005 | 수정: `framebudget_ui.cc` 컴파일 오류 1건 |
 | 0006 | 설정 화면 안내 문구 정리 |
+| 0007 | 새로 작성한 파일의 저작권자 표기 수정 |
 
 0004와 0005는 첫 빌드에서 나온 오류를 고친 기록입니다. 기능 패치에 합치지 않고 따로 남겼습니다.
 
 - `GURL::host()`가 `std::string_view`를 돌려주는데 `std::string`으로 암시 변환하고 있었습니다.
 - `BrowserContext`가 전방 선언만 되어 있어서 `UserPrefs::Get()`에 넘길 수 없었습니다.
 
-6개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
+7개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
 
 ## 빌드 방법
 
@@ -95,4 +96,13 @@ out/Default/chrome
 
 ## 출처와 라이선스
 
-이 패치는 [Chromium](https://www.chromium.org/) 소스를 수정합니다. Chromium은 BSD-3-Clause 라이선스이며, 포함된 제3자 코드는 각자의 라이선스를 따릅니다. 패치 자체도 이 저장소의 [LICENSE](../LICENSE)(BSD-3-Clause)를 따릅니다.
+이 패치는 [Chromium](https://www.chromium.org/) 소스(`156.0.8078.48`)를 수정합니다. 패치 안의 코드는 두 종류이며, 라이선스는 모두 BSD-3-Clause입니다.
+
+| 범위 | 저작권자 | 라이선스 |
+|---|---|---|
+| 새로 작성한 파일 (`chrome/browser/ui/framebudget/` 전체) | WieHyunSeo | 이 저장소의 [LICENSE](../LICENSE) |
+| 기존 Chromium 파일을 고친 부분 (viz, content, chrome의 기존 파일) | 원본은 The Chromium Authors | [LICENSE.chromium](LICENSE.chromium) (Chromium 원문) |
+
+빌드한 브라우저에는 Chromium과 그 안의 제3자 코드(Skia, V8 등)가 함께 들어갑니다. 이 코드들은 각자의 라이선스를 따릅니다. 빌드 결과물을 배포할 때는 제3자 라이선스 고지문을 함께 넣습니다. 고지문은 Chromium 소스의 `tools/licenses/licenses.py`로 만들 수 있으며, 브라우저의 `chrome://credits` 페이지와 같은 내용입니다.
+
+이 프로젝트는 Google이나 Chromium 프로젝트와 관련이 없습니다. "Chrome"은 Google LLC의 상표입니다.

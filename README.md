@@ -96,4 +96,7 @@ viz FrameSinkManager (GPU 프로세스)
 
 ## 라이선스
 
-[BSD-3-Clause](LICENSE). Chromium과 같은 라이선스입니다.
+이 저장소의 코드는 [BSD-3-Clause](LICENSE)입니다. Chromium과 같은 라이선스입니다.
+
+- [`chromium/patches/`](chromium/patches)는 [Chromium](https://www.chromium.org/) 소스를 수정하는 패치입니다. 기존 Chromium 파일을 고친 부분은 Chromium 라이선스([원문](chromium/LICENSE.chromium), Copyright The Chromium Authors)를 따릅니다. 범위는 [Chromium 빌드 문서](chromium/README.md#출처와-라이선스)에 정리했습니다.
+- 이 프로젝트는 Google이나 Chromium 프로젝트와 관련이 없습니다. "Chrome"은 Google LLC의 상표입니다.

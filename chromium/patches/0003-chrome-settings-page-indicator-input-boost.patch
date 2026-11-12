@@ -1,0 +1,1347 @@
+From 8b129084b88c4904b73aa51b3531b2b631b14a44 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 18:55:05 +0900
+Subject: [PATCH 3/6] =?UTF-8?q?chrome:=20=EC=84=A4=EC=A0=95=20=ED=99=94?=
+ =?UTF-8?q?=EB=A9=B4,=20=ED=91=9C=EC=8B=9C=20=EC=95=84=EC=9D=B4=EC=BD=98,?=
+ =?UTF-8?q?=20=EC=9E=85=EB=A0=A5=20=EC=8B=9C=20=EC=A0=9C=ED=95=9C=20?=
+ =?UTF-8?q?=ED=95=B4=EC=A0=9C=20=EC=B6=94=EA=B0=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+설정 화면에서 규칙을 관리하고, 제한 중임을 보여 주는 표시를 넣는다.
+클릭과 키 입력 직후에는 FPS 제한을 잠시 풀어 입력 반응이 느려지지 않게 한다.
+---
+ chrome/browser/prefs/BUILD.gn                 |   1 +
+ chrome/browser/prefs/browser_prefs.cc         |   2 +
+ chrome/browser/ui/framebudget/BUILD.gn        |  43 +-
+ .../ui/framebudget/framebudget_policy.cc      | 147 ++++++
+ .../ui/framebudget/framebudget_policy.h       |  84 ++++
+ .../ui/framebudget/framebudget_tab_helper.cc  | 279 +++++++++---
+ .../ui/framebudget/framebudget_tab_helper.h   |  81 +++-
+ .../browser/ui/framebudget/framebudget_ui.cc  | 427 ++++++++++++++++++
+ .../browser/ui/framebudget/framebudget_ui.h   |  28 ++
+ chrome/browser/ui/webui/BUILD.gn              |   1 +
+ .../browser/ui/webui/chrome_web_ui_configs.cc |   2 +
+ 11 files changed, 1007 insertions(+), 88 deletions(-)
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_policy.cc
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_policy.h
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_ui.cc
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_ui.h
+
+diff --git a/chrome/browser/prefs/BUILD.gn b/chrome/browser/prefs/BUILD.gn
+index 831aaa964e..018bfbbe8c 100644
+--- a/chrome/browser/prefs/BUILD.gn
++++ b/chrome/browser/prefs/BUILD.gn
+@@ -117,6 +117,7 @@ source_set("impl") {
+     "//chrome/browser/tips/core",
+     "//chrome/browser/tracing",
+     "//chrome/browser/ui:browser_ui_prefs",
++    "//chrome/browser/ui/framebudget:policy",
+     "//chrome/browser/ui/hats",
+     "//chrome/browser/ui/prefs",
+     "//chrome/browser/ui/profiles",
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index 35b02686a1..67711334cc 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -88,6 +88,7 @@
+ #include "chrome/browser/tips/core/tips_prefs.h"
+ #include "chrome/browser/tracing/chrome_tracing_delegate.h"
+ #include "chrome/browser/ui/browser_ui_prefs.h"
++#include "chrome/browser/ui/framebudget/framebudget_policy.h"
+ #include "chrome/browser/ui/network_profile_bubble.h"
+ #include "chrome/browser/ui/performance_controls/performance_controls_metrics.h"
+ #include "chrome/browser/ui/prefs/prefs_tab_helper.h"
+@@ -1936,6 +1937,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+   prefetch::RegisterPredictionOptionsProfilePrefs(registry);
+   PrefetchOriginDecider::RegisterPrefs(registry);
+   PrefsTabHelper::RegisterProfilePrefs(registry, locale);
++  framebudget::RegisterProfilePrefs(registry);
+   personal_context::prefs::RegisterProfilePrefs(registry);
+   privacy_sandbox::RegisterProfilePrefs(registry);
+   Profile::RegisterProfilePrefs(registry);
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index 7c3c157783..0f647a2bbe 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -2,15 +2,56 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++# Pref names, pref registration and the rule resolution. Kept free of UI
++# dependencies so that //chrome/browser/prefs can register the prefs.
++source_set("policy") {
++  sources = [
++    "framebudget_policy.cc",
++    "framebudget_policy.h",
++  ]
++  deps = [
++    "//base",
++    "//components/pref_registry",
++    "//components/prefs",
++  ]
++}
++
++# The per-tab helper: applies the limit, input boost and the status bubble
++# indicator.
+ source_set("framebudget") {
+   sources = [
+     "framebudget_tab_helper.cc",
+     "framebudget_tab_helper.h",
+   ]
+   public_deps = [
++    ":policy",
+     "//base",
++    "//components/prefs",
+     "//components/viz/common",
+     "//content/public/browser",
+   ]
+-  deps = [ "//url" ]
++  deps = [
++    "//chrome/browser/ui:browser_window_header",
++    "//chrome/browser/ui:status_bubble",
++    "//components/user_prefs",
++    "//third_party/blink/public/common:headers",
++    "//url",
++  ]
++}
++
++# chrome://framebudget
++source_set("webui") {
++  sources = [
++    "framebudget_ui.cc",
++    "framebudget_ui.h",
++  ]
++  public_deps = [ "//content/public/browser" ]
++  deps = [
++    ":framebudget",
++    ":policy",
++    "//base",
++    "//components/prefs",
++    "//components/user_prefs",
++    "//content/public/common",
++  ]
+ }
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+new file mode 100644
+index 0000000000..0b60d48238
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -0,0 +1,147 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/framebudget/framebudget_policy.h"
++
++#include <algorithm>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "base/values.h"
++#include "components/pref_registry/pref_registry_syncable.h"
++#include "components/prefs/pref_service.h"
++
++namespace framebudget {
++
++namespace {
++
++constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
++constexpr char kSitesSwitch[] = "framebudget-sites";
++constexpr int kMaxFps = 240;
++
++// Returns `value` as an FPS, or nullopt if it is not a number.
++std::optional<int> ParseFps(std::string_view value) {
++  int fps = 0;
++  if (!base::StringToInt(value, &fps)) {
++    return std::nullopt;
++  }
++  return ClampFps(fps);
++}
++
++// True if `host` is `site` or one of its subdomains.
++bool HostMatches(std::string_view host, std::string_view site) {
++  return host == site || (host.ends_with(site) && host.size() > site.size() &&
++                          host[host.size() - site.size() - 1] == '.');
++}
++
++}  // namespace
++
++CommandLineConfig::CommandLineConfig() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  if (command_line.HasSwitch(kDefaultFpsSwitch)) {
++    default_fps = ParseFps(command_line.GetSwitchValueASCII(kDefaultFpsSwitch));
++  }
++  const std::string rules = command_line.GetSwitchValueASCII(kSitesSwitch);
++  for (std::string_view rule :
++       base::SplitStringPiece(rules, ",", base::TRIM_WHITESPACE,
++                              base::SPLIT_WANT_NONEMPTY)) {
++    std::vector<std::string_view> parts = base::SplitStringPiece(
++        rule, "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++    std::optional<int> fps =
++        parts.size() == 2 ? ParseFps(parts[1]) : std::nullopt;
++    std::string host = parts.empty() ? std::string() : NormalizeHost(parts[0]);
++    if (!fps || host.empty()) {
++      LOG(WARNING) << "FrameBudget: ignoring malformed site rule: " << rule;
++      continue;
++    }
++    sites.emplace_back(std::move(host), *fps);
++  }
++}
++
++CommandLineConfig::~CommandLineConfig() = default;
++
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
++  registry->RegisterIntegerPref(kDefaultFpsPref, 0);
++  registry->RegisterDictionaryPref(kSitesPref);
++  registry->RegisterBooleanPref(kInputBoostPref, true);
++}
++
++const CommandLineConfig& GetCommandLineConfig() {
++  static const base::NoDestructor<CommandLineConfig> config;
++  return *config;
++}
++
++Decision Decide(const PrefService& prefs,
++                std::string_view host,
++                std::optional<int> tab_override) {
++  if (tab_override) {
++    return {ClampFps(*tab_override), Source::kTabOverride, ""};
++  }
++
++  const CommandLineConfig& command_line = GetCommandLineConfig();
++  for (const auto& [site, fps] : command_line.sites) {
++    if (HostMatches(host, site)) {
++      return {fps, Source::kCommandLineSite, site};
++    }
++  }
++
++  // Among saved rules the most specific domain wins.
++  const base::DictValue& saved = prefs.GetDict(kSitesPref);
++  std::string_view candidate = host;
++  while (!candidate.empty()) {
++    if (std::optional<int> fps = saved.FindInt(candidate)) {
++      return {ClampFps(*fps), Source::kSavedSite, std::string(candidate)};
++    }
++    const size_t dot = candidate.find('.');
++    if (dot == std::string_view::npos) {
++      break;
++    }
++    candidate = candidate.substr(dot + 1);
++  }
++
++  if (command_line.default_fps) {
++    return {*command_line.default_fps, Source::kCommandLineDefault, ""};
++  }
++  return {ClampFps(prefs.GetInteger(kDefaultFpsPref)), Source::kSavedDefault,
++          ""};
++}
++
++std::string_view SourceId(Source source) {
++  switch (source) {
++    case Source::kTabOverride:
++      return "tab";
++    case Source::kCommandLineSite:
++      return "cmdline-site";
++    case Source::kSavedSite:
++      return "saved-site";
++    case Source::kCommandLineDefault:
++      return "cmdline-default";
++    case Source::kSavedDefault:
++      return "default";
++  }
++}
++
++int ClampFps(int fps) {
++  return std::clamp(fps, 0, kMaxFps);
++}
++
++std::string NormalizeHost(std::string_view input) {
++  std::string_view host = base::TrimWhitespaceASCII(input, base::TRIM_ALL);
++  if (const size_t scheme = host.find("://");
++      scheme != std::string_view::npos) {
++    host = host.substr(scheme + 3);
++  }
++  host = host.substr(0, host.find_first_of("/?#:"));
++  while (host.ends_with('.')) {
++    host.remove_suffix(1);
++  }
++  return base::ToLowerASCII(host);
++}
++
++}  // namespace framebudget
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+new file mode 100644
+index 0000000000..6018c33685
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -0,0 +1,84 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_POLICY_H_
++#define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_POLICY_H_
++
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++class PrefService;
++
++namespace user_prefs {
++class PrefRegistrySyncable;
++}
++
++// FrameBudget: decides how many frames per second a tab's web content may
++// produce. An FPS of 0 means no limit.
++namespace framebudget {
++
++// Profile prefs, edited on chrome://framebudget.
++inline constexpr char kDefaultFpsPref[] = "framebudget.default_fps";
++// Dictionary of host -> FPS. A rule also covers the host's subdomains.
++inline constexpr char kSitesPref[] = "framebudget.sites";
++// Whether user input briefly lifts the limit of a tab.
++inline constexpr char kInputBoostPref[] = "framebudget.input_boost";
++
++void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
++
++// Command line rules, which take priority over the saved ones:
++//   --framebudget-default-fps=15
++//   --framebudget-sites=youtube.com=60,example.com=15
++struct CommandLineConfig {
++  // Parses the current process's command line.
++  CommandLineConfig();
++  CommandLineConfig(const CommandLineConfig&) = delete;
++  CommandLineConfig& operator=(const CommandLineConfig&) = delete;
++  ~CommandLineConfig();
++
++  std::optional<int> default_fps;
++  // (host, fps) in command line order. The first match wins.
++  std::vector<std::pair<std::string, int>> sites;
++};
++const CommandLineConfig& GetCommandLineConfig();
++
++// Where the FPS of a tab comes from, from highest to lowest priority.
++enum class Source {
++  kTabOverride,
++  kCommandLineSite,
++  kSavedSite,
++  kCommandLineDefault,
++  kSavedDefault,
++};
++
++struct Decision {
++  int fps = 0;
++  Source source = Source::kSavedDefault;
++  // The matching site rule's host, for kCommandLineSite and kSavedSite.
++  std::string rule;
++};
++
++// Decides the FPS for a tab showing `host`. `tab_override` is the tab's own
++// override, if any.
++Decision Decide(const PrefService& prefs,
++                std::string_view host,
++                std::optional<int> tab_override);
++
++// Stable identifier of `source`, used by chrome://framebudget.
++std::string_view SourceId(Source source);
++
++// Clamps `fps` into [0, 240]; anything not positive means no limit.
++int ClampFps(int fps);
++
++// Lower-cases `input` and strips a scheme, path and port, so that
++// "https://Example.com/x" becomes "example.com". Returns an empty string if
++// nothing usable is left.
++std::string NormalizeHost(std::string_view input);
++
++}  // namespace framebudget
++
++#endif  // CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_POLICY_H_
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 0a029dd33e..9e4e269bcb 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -6,117 +6,158 @@
+ 
+ #include <array>
+ #include <string>
+-#include <string_view>
+ #include <utility>
+-#include <vector>
+ 
+-#include "base/command_line.h"
++#include "base/functional/bind.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/string_number_conversions.h"
+-#include "base/strings/string_split.h"
+-#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/ui/browser_window.h"
++#include "chrome/browser/ui/status_bubble.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
++#include "components/user_prefs/user_prefs.h"
+ #include "content/public/browser/frame_rate_throttling.h"
+ #include "content/public/browser/render_frame_host.h"
+-#include "content/public/browser/render_widget_host.h"
+ #include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
+ #include "url/gurl.h"
+ 
+ namespace {
+ 
+-constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
+-constexpr char kSitesSwitch[] = "framebudget-sites";
+-
+-// Steps of the per-tab override. Stepping past the last one returns the tab to
+-// its site rule.
++// Steps of the tab override. Stepping past the last one clears the override.
+ constexpr std::array<int, 5> kOverrideSteps = {60, 30, 15, 5, 0};
+ 
+-struct Config {
+-  int default_fps = 0;
+-  // (host, fps) in command line order.
+-  std::vector<std::pair<std::string, int>> sites;
+-};
+-
+-// Returns `value` as a positive FPS, or 0 (no limit) if it is not one.
+-int ParseFps(std::string_view value) {
+-  int fps = 0;
+-  return base::StringToInt(value, &fps) && fps > 0 ? fps : 0;
+-}
+-
+-Config ReadConfig() {
+-  const base::CommandLine& command_line =
+-      *base::CommandLine::ForCurrentProcess();
+-  Config config;
+-  config.default_fps =
+-      ParseFps(command_line.GetSwitchValueASCII(kDefaultFpsSwitch));
+-  const std::string sites = command_line.GetSwitchValueASCII(kSitesSwitch);
+-  for (std::string_view rule :
+-       base::SplitStringPiece(sites, ",", base::TRIM_WHITESPACE,
+-                              base::SPLIT_WANT_NONEMPTY)) {
+-    std::vector<std::string_view> parts = base::SplitStringPiece(
+-        rule, "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+-    if (parts.size() != 2 || parts[0].empty()) {
+-      LOG(WARNING) << "FrameBudget: ignoring malformed site rule: " << rule;
+-      continue;
+-    }
+-    config.sites.emplace_back(base::ToLowerASCII(parts[0]),
+-                              ParseFps(parts[1]));
++// How long the limit stays lifted after the last user input.
++constexpr base::TimeDelta kBoostDuration = base::Seconds(1);
++
++// How long the status bubble shows a changed FPS.
++constexpr base::TimeDelta kIndicatorDuration = base::Seconds(2);
++
++std::vector<FrameBudgetTabHelper*>& Registry() {
++  static base::NoDestructor<std::vector<FrameBudgetTabHelper*>> helpers;
++  return *helpers;
++}
++
++int NextId() {
++  static int next_id = 0;
++  return ++next_id;
++}
++
++// Input that means the user is actively working with the page: scrolling,
++// typing, clicking, dragging or touching. Plain mouse moves are not counted,
++// so that a resting cursor does not keep the limit lifted.
++bool IsActiveInput(const blink::WebInputEvent& event) {
++  using Type = blink::WebInputEvent::Type;
++  const Type type = event.GetType();
++  if (type == Type::kMouseWheel || type == Type::kMouseDown ||
++      blink::WebInputEvent::IsKeyboardEventType(type) ||
++      blink::WebInputEvent::IsTouchEventType(type) ||
++      blink::WebInputEvent::IsGestureEventType(type)) {
++    return true;
+   }
+-  return config;
++  constexpr int kAnyButton = blink::WebInputEvent::kLeftButtonDown |
++                             blink::WebInputEvent::kMiddleButtonDown |
++                             blink::WebInputEvent::kRightButtonDown;
++  return type == Type::kMouseMove && (event.GetModifiers() & kAnyButton);
+ }
+ 
+-const Config& GetConfig() {
+-  static const base::NoDestructor<Config> config(ReadConfig());
+-  return *config;
++std::string DescribeFps(int fps) {
++  return fps > 0 ? base::NumberToString(fps) + " FPS" : "제한 없음";
+ }
+ 
+-// Returns the FPS of the first site rule matching `host` or one of its parent
+-// domains, or the default FPS.
+-int FpsForHost(std::string_view host) {
+-  const Config& config = GetConfig();
+-  for (const auto& [site, fps] : config.sites) {
+-    if (host == site || (host.ends_with(site) &&
+-                         host[host.size() - site.size() - 1] == '.')) {
+-      return fps;
+-    }
++std::string DescribeSource(const framebudget::Decision& decision) {
++  switch (decision.source) {
++    case framebudget::Source::kTabOverride:
++      return "이 탭 고정";
++    case framebudget::Source::kCommandLineSite:
++      return "실행 옵션 사이트 규칙 (" + decision.rule + ")";
++    case framebudget::Source::kSavedSite:
++      return "사이트 규칙 (" + decision.rule + ")";
++    case framebudget::Source::kCommandLineDefault:
++      return "실행 옵션 기본값";
++    case framebudget::Source::kSavedDefault:
++      return "기본값";
+   }
+-  return config.default_fps;
+ }
+ 
+ }  // namespace
+ 
+ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+     : content::WebContentsObserver(web_contents),
+-      content::WebContentsUserData<FrameBudgetTabHelper>(*web_contents) {
++      content::WebContentsUserData<FrameBudgetTabHelper>(*web_contents),
++      id_(NextId()) {
++  Registry().push_back(this);
++  pref_change_registrar_.Init(prefs());
++  for (const char* pref :
++       {framebudget::kDefaultFpsPref, framebudget::kSitesPref,
++        framebudget::kInputBoostPref}) {
++    pref_change_registrar_.Add(
++        pref, base::BindRepeating(&FrameBudgetTabHelper::Apply,
++                                  base::Unretained(this)));
++  }
+   Apply();
+ }
+ 
+-FrameBudgetTabHelper::~FrameBudgetTabHelper() = default;
++FrameBudgetTabHelper::~FrameBudgetTabHelper() {
++  std::erase(Registry(), this);
++}
++
++// static
++std::vector<FrameBudgetTabHelper*> FrameBudgetTabHelper::GetAll() {
++  return Registry();
++}
++
++// static
++FrameBudgetTabHelper* FrameBudgetTabHelper::FromId(int id) {
++  for (FrameBudgetTabHelper* helper : Registry()) {
++    if (helper->id() == id) {
++      return helper;
++    }
++  }
++  return nullptr;
++}
+ 
+-int FrameBudgetTabHelper::CycleTabOverride() {
++void FrameBudgetTabHelper::CycleTabOverride() {
+   if (!tab_override_fps_) {
+-    tab_override_fps_ = kOverrideSteps[0];
++    SetTabOverride(kOverrideSteps[0]);
+   } else {
+     size_t i = 0;
+     while (i < kOverrideSteps.size() &&
+            kOverrideSteps[i] != *tab_override_fps_) {
+       ++i;
+     }
+-    if (i + 1 < kOverrideSteps.size()) {
+-      tab_override_fps_ = kOverrideSteps[i + 1];
+-    } else {
+-      tab_override_fps_.reset();
+-    }
++    SetTabOverride(i + 1 < kOverrideSteps.size()
++                       ? std::optional<int>(kOverrideSteps[i + 1])
++                       : std::nullopt);
+   }
++  ShowIndicator();
++}
++
++void FrameBudgetTabHelper::SetTabOverride(std::optional<int> fps) {
++  tab_override_fps_ =
++      fps ? std::optional<int>(framebudget::ClampFps(*fps)) : std::nullopt;
+   Apply();
+-  return EffectiveFps();
+ }
+ 
+-int FrameBudgetTabHelper::EffectiveFps() const {
+-  if (tab_override_fps_) {
+-    return *tab_override_fps_;
++void FrameBudgetTabHelper::SaveAsSiteRule() {
++  const std::string site = host();
++  if (site.empty()) {
++    return;
+   }
+-  return FpsForHost(web_contents()->GetLastCommittedURL().host());
++  const int fps = Decide().fps;
++  ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)->Set(site, fps);
++  // The saved rule now gives the same FPS, so the override is redundant.
++  SetTabOverride(std::nullopt);
++}
++
++framebudget::Decision FrameBudgetTabHelper::Decide() const {
++  return framebudget::Decide(*prefs(), host(), tab_override_fps_);
++}
++
++std::string FrameBudgetTabHelper::host() const {
++  return web_contents()->GetLastCommittedURL().host();
+ }
+ 
+ void FrameBudgetTabHelper::RenderFrameCreated(
+@@ -139,17 +180,54 @@ void FrameBudgetTabHelper::PrimaryPageChanged(content::Page& page) {
+ }
+ 
+ void FrameBudgetTabHelper::WebContentsDestroyed() {
++  boost_timer_.Stop();
++  indicator_timer_.Stop();
++  input_observation_.Reset();
++  widget_observation_.Reset();
++  pref_change_registrar_.RemoveAll();
+   content::SetFrameBudgetForFrameSink(applied_frame_sink_id_,
+                                       base::TimeDelta());
+   applied_frame_sink_id_ = viz::FrameSinkId();
+ }
+ 
++void FrameBudgetTabHelper::OnInputEvent(const content::RenderWidgetHost& widget,
++                                        const blink::WebInputEvent& event,
++                                        InputEventSource source) {
++  if (!IsActiveInput(event) ||
++      !prefs()->GetBoolean(framebudget::kInputBoostPref)) {
++    return;
++  }
++  // Nothing to lift on an unlimited tab.
++  if (!boosted_ && Decide().fps == 0) {
++    return;
++  }
++  boost_timer_.Start(FROM_HERE, kBoostDuration,
++                     base::BindOnce(&FrameBudgetTabHelper::EndBoost,
++                                    base::Unretained(this)));
++  if (!boosted_) {
++    boosted_ = true;
++    Apply();
++  }
++}
++
++void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
++    content::RenderWidgetHost* widget) {
++  input_observation_.Reset();
++  widget_observation_.Reset();
++}
++
+ void FrameBudgetTabHelper::Apply() {
+   content::RenderWidgetHost* widget =
+       web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  ObserveWidget(widget);
++
++  if (boosted_ && !prefs()->GetBoolean(framebudget::kInputBoostPref)) {
++    boost_timer_.Stop();
++    boosted_ = false;
++  }
+   const viz::FrameSinkId frame_sink_id =
+       widget ? widget->GetFrameSinkId() : viz::FrameSinkId();
+-  const int fps = EffectiveFps();
++  const int fps = boosted_ ? 0 : Decide().fps;
+   const base::TimeDelta interval =
+       fps > 0 ? base::Hertz(fps) : base::TimeDelta();
+   if (frame_sink_id == applied_frame_sink_id_ &&
+@@ -167,11 +245,64 @@ void FrameBudgetTabHelper::Apply() {
+   applied_frame_sink_id_ = frame_sink_id;
+   applied_interval_ = interval;
+ 
+-  VLOG(1) << "FrameBudget: "
+-          << web_contents()->GetLastCommittedURL().host() << " -> "
+-          << (fps > 0 ? base::NumberToString(fps) + " fps" : "no limit")
+-          << (tab_override_fps_ ? " (tab override)" : "") << ", frame sink "
++  VLOG(1) << "FrameBudget: " << host() << " -> " << DescribeFps(fps)
++          << (boosted_ ? " (input boost)" : "") << ", frame sink "
+           << frame_sink_id.ToString();
+ }
+ 
++void FrameBudgetTabHelper::ObserveWidget(content::RenderWidgetHost* widget) {
++  if (input_observation_.GetSource() == widget) {
++    return;
++  }
++  input_observation_.Reset();
++  widget_observation_.Reset();
++  if (widget) {
++    input_observation_.Observe(widget);
++    widget_observation_.Observe(widget);
++  }
++}
++
++void FrameBudgetTabHelper::EndBoost() {
++  boosted_ = false;
++  Apply();
++}
++
++void FrameBudgetTabHelper::ShowIndicator() {
++  BrowserWindow* window =
++      BrowserWindow::FindBrowserWindowWithWebContents(web_contents());
++  if (!window) {
++    return;
++  }
++  const framebudget::Decision decision = Decide();
++  const std::u16string text = base::UTF8ToUTF16(
++      "FrameBudget: " + DescribeFps(decision.fps) + " · " +
++      DescribeSource(decision));
++  for (StatusBubble* bubble : window->GetStatusBubbles()) {
++    if (bubble) {
++      bubble->SetStatus(text);
++    }
++  }
++  indicator_timer_.Start(FROM_HERE, kIndicatorDuration,
++                         base::BindOnce(&FrameBudgetTabHelper::HideIndicator,
++                                        base::Unretained(this)));
++}
++
++void FrameBudgetTabHelper::HideIndicator() {
++  // Look the window up again: the tab may have moved to another window.
++  BrowserWindow* window =
++      BrowserWindow::FindBrowserWindowWithWebContents(web_contents());
++  if (!window) {
++    return;
++  }
++  for (StatusBubble* bubble : window->GetStatusBubbles()) {
++    if (bubble) {
++      bubble->SetStatus(std::u16string());
++    }
++  }
++}
++
++PrefService* FrameBudgetTabHelper::prefs() const {
++  return user_prefs::UserPrefs::Get(web_contents()->GetBrowserContext());
++}
++
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(FrameBudgetTabHelper);
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index ca257467cb..1fae7a2d0f 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -6,36 +6,63 @@
+ #define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_HELPER_H_
+ 
+ #include <optional>
++#include <string>
++#include <vector>
+ 
++#include "base/scoped_observation.h"
+ #include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/ui/framebudget/framebudget_policy.h"
++#include "components/prefs/pref_change_registrar.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_observer.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ 
++class PrefService;
++
+ // FrameBudget: limits how often a tab's web content produces frames, while the
+-// browser UI and the monitor keep their normal refresh rate.
++// browser UI and the monitor keep their normal refresh rate. The FPS of a tab
++// is decided by framebudget::Decide() from, in order of priority, the tab's
++// own override (Alt+Shift+F or chrome://framebudget), command line rules,
++// saved site rules and the default.
+ //
+-// The limit of a tab comes from, in order of priority:
+-//  1. A per-tab override, cycled with CycleTabOverride() (Alt+Shift+F).
+-//  2. The first rule in --framebudget-sites matching the tab's host or one of
+-//     its parent domains, e.g.
+-//     --framebudget-sites=youtube.com=60,example.com=15
+-//  3. --framebudget-default-fps. No limit when absent.
+-// An FPS of 0 means no limit.
++// While the user scrolls, types, clicks or touches the tab, the limit is
++// lifted and comes back shortly after the input stops (input boost, can be
++// turned off on chrome://framebudget).
+ class FrameBudgetTabHelper
+     : public content::WebContentsObserver,
++      public content::RenderWidgetHost::InputEventObserver,
++      public content::RenderWidgetHostObserver,
+       public content::WebContentsUserData<FrameBudgetTabHelper> {
+  public:
+   FrameBudgetTabHelper(const FrameBudgetTabHelper&) = delete;
+   FrameBudgetTabHelper& operator=(const FrameBudgetTabHelper&) = delete;
+   ~FrameBudgetTabHelper() override;
+ 
+-  // Steps the per-tab override: site rule -> 60 -> 30 -> 15 -> 5 -> no limit
+-  // -> site rule. Returns the FPS now in effect (0 = no limit).
+-  int CycleTabOverride();
++  // All live helpers, for chrome://framebudget.
++  static std::vector<FrameBudgetTabHelper*> GetAll();
++  // Returns the live helper with `id`, or null.
++  static FrameBudgetTabHelper* FromId(int id);
++
++  // Steps the tab override: none -> 60 -> 30 -> 15 -> 5 -> no limit -> none,
++  // and briefly shows the result in the window's status bubble.
++  void CycleTabOverride();
++
++  // Sets or clears (nullopt) the tab override.
++  void SetTabOverride(std::optional<int> fps);
++
++  // Saves the FPS now decided for this tab as the site rule of its host.
++  void SaveAsSiteRule();
++
++  // The FPS decided by the rules, ignoring input boost.
++  framebudget::Decision Decide() const;
+ 
+-  // Returns the FPS in effect for this tab (0 = no limit).
+-  int EffectiveFps() const;
++  int id() const { return id_; }
++  std::optional<int> tab_override() const { return tab_override_fps_; }
++  bool boosted() const { return boosted_; }
++  std::string host() const;
+ 
+  private:
+   friend class content::WebContentsUserData<FrameBudgetTabHelper>;
+@@ -49,13 +76,41 @@ class FrameBudgetTabHelper
+   void PrimaryPageChanged(content::Page& page) override;
+   void WebContentsDestroyed() override;
+ 
++  // content::RenderWidgetHost::InputEventObserver:
++  void OnInputEvent(const content::RenderWidgetHost& widget,
++                    const blink::WebInputEvent& event,
++                    InputEventSource source) override;
++
++  // content::RenderWidgetHostObserver:
++  void RenderWidgetHostDestroyed(content::RenderWidgetHost* widget) override;
++
+   // Sends the tab's limit to viz when its frame sink or FPS has changed.
+   void Apply();
+ 
++  // Watches input on `widget`, the main frame's widget.
++  void ObserveWidget(content::RenderWidgetHost* widget);
++
++  void EndBoost();
++  void ShowIndicator();
++  void HideIndicator();
++  PrefService* prefs() const;
++
++  const int id_;
+   std::optional<int> tab_override_fps_;
++  bool boosted_ = false;
+   viz::FrameSinkId applied_frame_sink_id_;
+   base::TimeDelta applied_interval_;
+ 
++  base::OneShotTimer boost_timer_;
++  base::OneShotTimer indicator_timer_;
++  PrefChangeRegistrar pref_change_registrar_;
++  base::ScopedObservation<content::RenderWidgetHost,
++                          content::RenderWidgetHost::InputEventObserver>
++      input_observation_{this};
++  base::ScopedObservation<content::RenderWidgetHost,
++                          content::RenderWidgetHostObserver>
++      widget_observation_{this};
++
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+new file mode 100644
+index 0000000000..fa720430b9
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -0,0 +1,427 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/framebudget/framebudget_ui.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/values.h"
++#include "chrome/browser/ui/framebudget/framebudget_policy.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
++#include "components/user_prefs/user_prefs.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "content/public/browser/web_ui_message_handler.h"
++#include "content/public/common/url_constants.h"
++
++namespace {
++
++constexpr char kHost[] = "framebudget";
++
++// The page is small, so it is served from these strings instead of a grit
++// resource bundle. The default WebUI CSP only allows scripts and styles from
++// 'self', and Trusted Types forbid innerHTML, so the script builds the DOM by
++// hand.
++constexpr char kHtml[] = R"HTML(<!doctype html>
++<html lang="ko">
++<head>
++<meta charset="utf-8">
++<title>FrameBudget 설정</title>
++<link rel="stylesheet" href="framebudget.css">
++<script type="module" src="framebudget.js"></script>
++</head>
++<body>
++<h1>FrameBudget</h1>
++<p class="note">웹 콘텐츠가 프레임을 만드는 빈도를 제한해요. 브라우저 화면과 모니터 주사율은 그대로예요.</p>
++
++<section>
++  <h2>기본값</h2>
++  <label>규칙이 없는 사이트 <span id="default"></span></label>
++  <p class="note" id="default-note"></p>
++  <label><input type="checkbox" id="boost"> 스크롤·입력 중에는 잠깐 제한 풀기</label>
++</section>
++
++<section>
++  <h2>사이트 규칙</h2>
++  <p class="note">하위 도메인에도 적용돼요. 더 구체적인 도메인 규칙이 우선이에요.</p>
++  <table>
++    <thead><tr><th>사이트</th><th>FPS</th><th></th></tr></thead>
++    <tbody id="sites"></tbody>
++  </table>
++  <form id="add-site">
++    <input id="new-host" placeholder="예: youtube.com" required>
++    <span id="new-fps"></span>
++    <button type="submit">추가</button>
++  </form>
++  <div id="cmdline-sites"></div>
++</section>
++
++<section>
++  <h2>열린 탭</h2>
++  <p class="note">Alt+Shift+F로 현재 탭의 FPS를 바로 바꿀 수 있어요.</p>
++  <table>
++    <thead><tr><th>탭</th><th>지금</th><th>적용 이유</th><th>이 탭만</th><th></th></tr></thead>
++    <tbody id="tabs"></tbody>
++  </table>
++</section>
++</body>
++</html>
++)HTML";
++
++constexpr char kCss[] = R"CSS(
++:root { color-scheme: light dark; --muted: #666; --line: #ddd; }
++@media (prefers-color-scheme: dark) { :root { --muted: #aaa; --line: #444; } }
++body { font: 14px/1.6 system-ui, sans-serif; max-width: 960px; margin: 24px auto;
++       padding: 0 16px; }
++h1 { font-size: 22px; margin-bottom: 4px; }
++h2 { font-size: 16px; margin-top: 28px; }
++.note { color: var(--muted); margin: 4px 0 8px; }
++table { border-collapse: collapse; width: 100%; margin: 8px 0; }
++th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
++         vertical-align: middle; }
++td.title { max-width: 360px; overflow: hidden; text-overflow: ellipsis;
++           white-space: nowrap; }
++.host { color: var(--muted); font-size: 12px; }
++.boost { color: #c60; font-size: 12px; margin-left: 6px; }
++form { display: flex; gap: 8px; margin-top: 8px; }
++label { display: block; margin: 6px 0; }
++)CSS";
++
++constexpr char kJs[] = R"JS(
++const $ = (id) => document.getElementById(id);
++const CHOICES = [0, 60, 30, 15, 5];
++const fpsLabel = (fps) => (fps > 0 ? `${fps} FPS` : '제한 없음');
++const SOURCE = {
++  'tab': '이 탭 고정',
++  'cmdline-site': '실행 옵션 사이트 규칙',
++  'saved-site': '사이트 규칙',
++  'cmdline-default': '실행 옵션 기본값',
++  'default': '기본값',
++};
++
++function el(tag, text) {
++  const node = document.createElement(tag);
++  if (text !== undefined) node.textContent = text;
++  return node;
++}
++
++function fpsSelect(value, onChange, extra) {
++  const select = el('select');
++  for (const [optionValue, text] of extra || []) {
++    select.add(new Option(text, String(optionValue)));
++  }
++  const choices = CHOICES.includes(value) || value < 0 ? CHOICES : [...CHOICES, value];
++  for (const fps of choices) select.add(new Option(fpsLabel(fps), String(fps)));
++  select.value = String(value);
++  select.onchange = () => onChange(Number(select.value));
++  return select;
++}
++
++function button(text, onClick) {
++  const node = el('button', text);
++  node.type = 'button';
++  node.onclick = onClick;
++  return node;
++}
++
++function row(...cells) {
++  const tr = el('tr');
++  for (const cell of cells) {
++    const td = el('td');
++    td.append(cell);
++    tr.append(td);
++  }
++  return tr;
++}
++
++let newFps = 15;
++let latest = null;
++
++function render(state) {
++  $('default').replaceChildren(
++      fpsSelect(state.defaultFps, (fps) => chrome.send('setDefaultFps', [fps])));
++  $('default-note').textContent = state.commandLineDefaultFps === undefined ?
++      '' :
++      `실행 옵션 --framebudget-default-fps=${state.commandLineDefaultFps} 이 우선 적용되고 있어요.`;
++  $('boost').checked = state.inputBoost;
++
++  $('sites').replaceChildren(...state.sites.map((site) => row(
++      site.host,
++      fpsSelect(site.fps, (fps) => chrome.send('setSiteRule', [site.host, fps])),
++      button('삭제', () => chrome.send('removeSiteRule', [site.host])))));
++  $('new-fps').replaceChildren(fpsSelect(newFps, (fps) => { newFps = fps; }));
++
++  const cmdline = $('cmdline-sites');
++  cmdline.replaceChildren();
++  if (state.commandLineSites.length) {
++    cmdline.append(el('p', '실행 옵션 규칙 (저장된 규칙보다 우선, 여기서 바꿀 수 없음): ' +
++        state.commandLineSites.map((s) => `${s.host}=${fpsLabel(s.fps)}`).join(', ')));
++    cmdline.firstChild.className = 'note';
++  }
++
++  $('tabs').replaceChildren(...state.tabs.map((tab) => {
++    const title = el('div', tab.title || '(제목 없음)');
++    const host = el('div', tab.host);
++    host.className = 'host';
++    const titleCell = el('div');
++    titleCell.append(title, host);
++    const now = el('span', fpsLabel(tab.fps));
++    if (tab.boosted) {
++      const boost = el('span', '입력 중이라 잠시 해제');
++      boost.className = 'boost';
++      now.append(boost);
++    }
++    const reason = SOURCE[tab.source] + (tab.rule ? ` (${tab.rule})` : '');
++    const override = fpsSelect(
++        tab.hasOverride ? tab.fps : -1,
++        (fps) => chrome.send('setTabOverride', [tab.id, fps]),
++        [[-1, '규칙 따름']]);
++    const save = button('이 사이트 규칙으로 저장',
++        () => chrome.send('saveTabAsSiteRule', [tab.id]));
++    save.disabled = !tab.host;
++    const tr = row(titleCell, now, reason, override, save);
++    tr.firstChild.className = 'title';
++    return tr;
++  }));
++}
++
++window.framebudget = {
++  onState(state) {
++    latest = state;
++    // Re-rendering replaces the controls, so wait while the user is using one.
++    const active = document.activeElement;
++    if (active && ['SELECT', 'INPUT'].includes(active.tagName)) return;
++    render(state);
++  },
++};
++
++document.addEventListener('focusout', () => {
++  if (latest) setTimeout(() => window.framebudget.onState(latest));
++});
++$('boost').onchange = () => chrome.send('setInputBoost', [$('boost').checked]);
++$('add-site').onsubmit = (event) => {
++  event.preventDefault();
++  chrome.send('setSiteRule', [$('new-host').value, newFps]);
++  $('new-host').value = '';
++};
++
++chrome.send('getState');
++setInterval(() => chrome.send('getState'), 1000);
++)JS";
++
++bool ShouldHandleRequest(const std::string& path) {
++  return true;
++}
++
++void HandleRequest(const std::string& path,
++                   content::WebUIDataSource::GotDataCallback callback) {
++  std::string body = kHtml;
++  if (path.ends_with(".js")) {
++    body = kJs;
++  } else if (path.ends_with(".css")) {
++    body = kCss;
++  }
++  std::move(callback).Run(
++      base::MakeRefCounted<base::RefCountedString>(std::move(body)));
++}
++
++// JS numbers may arrive as doubles.
++std::optional<int> GetInt(const base::Value& value) {
++  if (value.is_int()) {
++    return value.GetInt();
++  }
++  if (value.is_double()) {
++    return static_cast<int>(value.GetDouble());
++  }
++  return std::nullopt;
++}
++
++class FrameBudgetHandler : public content::WebUIMessageHandler {
++ public:
++  FrameBudgetHandler() = default;
++  FrameBudgetHandler(const FrameBudgetHandler&) = delete;
++  FrameBudgetHandler& operator=(const FrameBudgetHandler&) = delete;
++  ~FrameBudgetHandler() override = default;
++
++  // content::WebUIMessageHandler:
++  void RegisterMessages() override {
++    Register("getState", &FrameBudgetHandler::HandleGetState);
++    Register("setDefaultFps", &FrameBudgetHandler::HandleSetDefaultFps);
++    Register("setInputBoost", &FrameBudgetHandler::HandleSetInputBoost);
++    Register("setSiteRule", &FrameBudgetHandler::HandleSetSiteRule);
++    Register("removeSiteRule", &FrameBudgetHandler::HandleRemoveSiteRule);
++    Register("setTabOverride", &FrameBudgetHandler::HandleSetTabOverride);
++    Register("saveTabAsSiteRule", &FrameBudgetHandler::HandleSaveTabAsSiteRule);
++  }
++
++ private:
++  using Handler = void (FrameBudgetHandler::*)(const base::ListValue&);
++
++  void Register(std::string_view message, Handler handler) {
++    web_ui()->RegisterMessageCallback(
++        message, base::BindRepeating(handler, base::Unretained(this)));
++  }
++
++  content::BrowserContext* context() {
++    return web_ui()->GetWebContents()->GetBrowserContext();
++  }
++
++  PrefService* prefs() { return user_prefs::UserPrefs::Get(context()); }
++
++  // Returns the helper of tab `value` if it belongs to this profile.
++  FrameBudgetTabHelper* FindTab(const base::Value& value) {
++    std::optional<int> id = GetInt(value);
++    FrameBudgetTabHelper* helper =
++        id ? FrameBudgetTabHelper::FromId(*id) : nullptr;
++    if (!helper || helper->web_contents()->GetBrowserContext() != context()) {
++      return nullptr;
++    }
++    return helper;
++  }
++
++  void HandleGetState(const base::ListValue& args) { SendState(); }
++
++  void HandleSetDefaultFps(const base::ListValue& args) {
++    if (args.size() == 1) {
++      if (std::optional<int> fps = GetInt(args[0])) {
++        prefs()->SetInteger(framebudget::kDefaultFpsPref,
++                            framebudget::ClampFps(*fps));
++      }
++    }
++    SendState();
++  }
++
++  void HandleSetInputBoost(const base::ListValue& args) {
++    if (args.size() == 1 && args[0].is_bool()) {
++      prefs()->SetBoolean(framebudget::kInputBoostPref, args[0].GetBool());
++    }
++    SendState();
++  }
++
++  void HandleSetSiteRule(const base::ListValue& args) {
++    if (args.size() == 2 && args[0].is_string()) {
++      const std::string host = framebudget::NormalizeHost(args[0].GetString());
++      std::optional<int> fps = GetInt(args[1]);
++      if (!host.empty() && fps) {
++        ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)
++            ->Set(host, framebudget::ClampFps(*fps));
++      }
++    }
++    SendState();
++  }
++
++  void HandleRemoveSiteRule(const base::ListValue& args) {
++    if (args.size() == 1 && args[0].is_string()) {
++      ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)
++          ->Remove(args[0].GetString());
++    }
++    SendState();
++  }
++
++  // Args: tab id, FPS (negative clears the override).
++  void HandleSetTabOverride(const base::ListValue& args) {
++    if (args.size() == 2) {
++      FrameBudgetTabHelper* helper = FindTab(args[0]);
++      std::optional<int> fps = GetInt(args[1]);
++      if (helper && fps) {
++        helper->SetTabOverride(*fps < 0 ? std::nullopt
++                                        : std::optional<int>(*fps));
++      }
++    }
++    SendState();
++  }
++
++  void HandleSaveTabAsSiteRule(const base::ListValue& args) {
++    if (args.size() == 1) {
++      if (FrameBudgetTabHelper* helper = FindTab(args[0])) {
++        helper->SaveAsSiteRule();
++      }
++    }
++    SendState();
++  }
++
++  void SendState() {
++    AllowJavascript();
++    CallJavascriptFunction("framebudget.onState", base::Value(BuildState()));
++  }
++
++  base::DictValue BuildState() {
++    const framebudget::CommandLineConfig& command_line =
++        framebudget::GetCommandLineConfig();
++    base::DictValue state;
++    state.Set("defaultFps", prefs()->GetInteger(framebudget::kDefaultFpsPref));
++    if (command_line.default_fps) {
++      state.Set("commandLineDefaultFps", *command_line.default_fps);
++    }
++    state.Set("inputBoost",
++              prefs()->GetBoolean(framebudget::kInputBoostPref));
++
++    base::ListValue sites;
++    for (const auto [host, value] :
++         prefs()->GetDict(framebudget::kSitesPref)) {
++      if (std::optional<int> fps = value.GetIfInt()) {
++        base::DictValue site;
++        site.Set("host", host);
++        site.Set("fps", *fps);
++        sites.Append(std::move(site));
++      }
++    }
++    state.Set("sites", std::move(sites));
++
++    base::ListValue command_line_sites;
++    for (const auto& [host, fps] : command_line.sites) {
++      base::DictValue site;
++      site.Set("host", host);
++      site.Set("fps", fps);
++      command_line_sites.Append(std::move(site));
++    }
++    state.Set("commandLineSites", std::move(command_line_sites));
++
++    base::ListValue tabs;
++    for (FrameBudgetTabHelper* helper : FrameBudgetTabHelper::GetAll()) {
++      content::WebContents* contents = helper->web_contents();
++      if (contents->GetBrowserContext() != context()) {
++        continue;
++      }
++      const framebudget::Decision decision = helper->Decide();
++      base::DictValue tab;
++      tab.Set("id", helper->id());
++      tab.Set("title", base::UTF16ToUTF8(contents->GetTitle()));
++      tab.Set("host", helper->host());
++      tab.Set("fps", decision.fps);
++      tab.Set("source", framebudget::SourceId(decision.source));
++      tab.Set("rule", decision.rule);
++      tab.Set("boosted", helper->boosted());
++      tab.Set("hasOverride", helper->tab_override().has_value());
++      tabs.Append(std::move(tab));
++    }
++    state.Set("tabs", std::move(tabs));
++    return state;
++  }
++};
++
++}  // namespace
++
++FrameBudgetUIConfig::FrameBudgetUIConfig()
++    : DefaultWebUIConfig(content::kChromeUIScheme, kHost) {}
++
++FrameBudgetUI::FrameBudgetUI(content::WebUI* web_ui)
++    : content::WebUIController(web_ui) {
++  content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
++      web_ui->GetWebContents()->GetBrowserContext(), kHost);
++  source->SetRequestFilter(base::BindRepeating(&ShouldHandleRequest),
++                           base::BindRepeating(&HandleRequest));
++  web_ui->AddMessageHandler(std::make_unique<FrameBudgetHandler>());
++}
++
++FrameBudgetUI::~FrameBudgetUI() = default;
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.h b/chrome/browser/ui/framebudget/framebudget_ui.h
+new file mode 100644
+index 0000000000..5f8ae6cb12
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_ui.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_UI_H_
++#define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_UI_H_
++
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/webui_config.h"
++
++class FrameBudgetUI;
++
++// chrome://framebudget: edits the saved FrameBudget rules and shows the FPS of
++// every open tab.
++class FrameBudgetUIConfig : public content::DefaultWebUIConfig<FrameBudgetUI> {
++ public:
++  FrameBudgetUIConfig();
++};
++
++class FrameBudgetUI : public content::WebUIController {
++ public:
++  explicit FrameBudgetUI(content::WebUI* web_ui);
++  FrameBudgetUI(const FrameBudgetUI&) = delete;
++  FrameBudgetUI& operator=(const FrameBudgetUI&) = delete;
++  ~FrameBudgetUI() override;
++};
++
++#endif  // CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_UI_H_
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index 7341632b43..aaab5874cb 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -58,6 +58,7 @@ source_set("configs") {
+     "//chrome/browser/glic",
+     "//chrome/browser/glic:impl",
+     "//chrome/browser/ui",
++    "//chrome/browser/ui/framebudget:webui",
+     "//chrome/browser/ui/webui/about",
+     "//chrome/browser/ui/webui/accessibility",
+     "//chrome/browser/ui/webui/actor_internals",
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index 139fecebd5..b148e3984e 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -12,6 +12,7 @@
+ #include "chrome/browser/glic/experimental_opt_in/glic_experimental_opt_in_ui.h"
+ #include "chrome/browser/glic/host/glic_ui.h"
+ #include "chrome/browser/optimization_guide/optimization_guide_internals_ui.h"
++#include "chrome/browser/ui/framebudget/framebudget_ui.h"
+ #include "chrome/browser/ui/webui/about/about_ui.h"
+ #include "chrome/browser/ui/webui/accessibility/accessibility_ui.h"
+ #include "chrome/browser/ui/webui/actor_internals/actor_internals_ui.h"
+@@ -265,6 +266,7 @@ void RegisterChromeWebUIConfigs() {
+   auto& map = content::WebUIConfigMap::GetInstance();
+   map.AddWebUIConfig(std::make_unique<AccessibilityUIConfig>());
+   map.AddWebUIConfig(std::make_unique<AutofillInternalsUIConfig>());
++  map.AddWebUIConfig(std::make_unique<FrameBudgetUIConfig>());
+   map.AddWebUIConfig(std::make_unique<BluetoothInternalsUIConfig>());
+   map.AddWebUIConfig(
+       std::make_unique<browser_actuator::BrowserActuatorInternalsUIConfig>());

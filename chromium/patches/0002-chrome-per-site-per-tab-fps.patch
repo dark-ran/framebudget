@@ -1,0 +1,399 @@
+From 9baf74c8b21410748447e69b933d2ee95a494764 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 18:55:04 +0900
+Subject: [PATCH 2/6] =?UTF-8?q?chrome:=20=EC=82=AC=EC=9D=B4=ED=8A=B8=C2=B7?=
+ =?UTF-8?q?=ED=83=AD=EB=B3=84=20FPS=20=EC=83=81=ED=95=9C=20=EC=A0=81?=
+ =?UTF-8?q?=EC=9A=A9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+탭 도우미(FrameBudgetTabHelper)와 규칙 정책(framebudget_policy)을 추가해 탭마다 FPS 상한을 건다.
+chrome://framebudget 페이지와 Alt+Shift+F 단축키를 함께 넣는다.
+---
+ chrome/app/chrome_command_ids.h               |   1 +
+ chrome/browser/ui/BUILD.gn                    |   2 +
+ chrome/browser/ui/accelerator_table.cc        |   2 +
+ .../browser/ui/browser_command_controller.cc  |  10 +
+ chrome/browser/ui/framebudget/BUILD.gn        |  16 ++
+ .../ui/framebudget/framebudget_tab_helper.cc  | 177 ++++++++++++++++++
+ .../ui/framebudget/framebudget_tab_helper.h   |  62 ++++++
+ chrome/browser/ui/tab_helpers.cc              |   2 +
+ 8 files changed, 272 insertions(+)
+ create mode 100644 chrome/browser/ui/framebudget/BUILD.gn
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_tab_helper.h
+
+diff --git a/chrome/app/chrome_command_ids.h b/chrome/app/chrome_command_ids.h
+index a9f146ad74..33ab47ca19 100644
+--- a/chrome/app/chrome_command_ids.h
++++ b/chrome/app/chrome_command_ids.h
+@@ -293,6 +293,7 @@
+ #define IDC_SHOW_TABS_FROM_OTHER_DEVICES_SIDE_PANEL 40304
+ #define IDC_CHROME_ENTERPRISE_RELEASE_NOTES 40305
+ #define IDC_SHOW_TTC_MENU 40306
++#define IDC_FRAMEBUDGET_CYCLE_TAB_FPS 40390
+ 
+ // Spell-check
+ #define IDC_SPELLCHECK_SUGGESTION_0     41000
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index 238f8625e4..e3533e8db9 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -675,6 +675,7 @@ if (!is_android) {
+       "//chrome/browser/actor/ui:actor_overlay",
+       "//chrome/browser/actor/ui:actor_overlay_web_view",
+       "//chrome/browser/apps/app_service",
++      "//chrome/browser/ui/framebudget",
+       "//chrome/browser/bookmarks",
+       "//chrome/browser/browsing_data",
+       "//chrome/browser/devtools",
+@@ -1327,6 +1328,7 @@ source_set("tab_helpers_impl") {
+     "//chrome/browser/favicon",
+     "//chrome/browser/file_system_access",
+     "//chrome/browser/glic:impl",
++    "//chrome/browser/ui/framebudget",
+     "//chrome/browser/glic/public:features",
+     "//chrome/browser/history",
+     "//chrome/browser/history_clusters",
+diff --git a/chrome/browser/ui/accelerator_table.cc b/chrome/browser/ui/accelerator_table.cc
+index 1a68ca9232..4f4c0762f6 100644
+--- a/chrome/browser/ui/accelerator_table.cc
++++ b/chrome/browser/ui/accelerator_table.cc
+@@ -67,6 +67,8 @@ const AcceleratorMapping kAcceleratorMap[] = {
+     {ui::VKEY_W, ui::EF_SHIFT_DOWN | ui::EF_PLATFORM_ACCELERATOR,
+      IDC_CLOSE_WINDOW},
+     {ui::VKEY_F, ui::EF_PLATFORM_ACCELERATOR, IDC_FIND},
++    {ui::VKEY_F, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN,
++     IDC_FRAMEBUDGET_CYCLE_TAB_FPS},
+     {ui::VKEY_A, ui::EF_SHIFT_DOWN | ui::EF_PLATFORM_ACCELERATOR,
+      IDC_TAB_SEARCH},
+     {ui::VKEY_G, ui::EF_PLATFORM_ACCELERATOR, IDC_FIND_NEXT},
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 921461b9e9..dba1dd8653 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -69,6 +69,7 @@
+ #include "chrome/browser/ui/chrome_pages.h"
+ #include "chrome/browser/ui/customize_chrome/side_panel_controller.h"
+ #include "chrome/browser/ui/dialogs/browser_dialogs.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ #include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+ #include "chrome/browser/ui/lens/lens_overlay_controller.h"
+ #include "chrome/browser/ui/managed_ui.h"
+@@ -1169,6 +1170,14 @@ void BrowserCommandController::HandleCommandWithDisposition(
+       ToggleDevToolsWindow(browser_, DevToolsToggleAction::Toggle(),
+                            DevToolsOpenedByAction::kToggleShortcut);
+       break;
++    case IDC_FRAMEBUDGET_CYCLE_TAB_FPS:
++      if (content::WebContents* contents =
++              browser_->tab_strip_model()->GetActiveWebContents()) {
++        if (auto* helper = FrameBudgetTabHelper::FromWebContents(contents)) {
++          helper->CycleTabOverride();
++        }
++      }
++      break;
+     case IDC_TASK_MANAGER:
+       OpenTaskManager(browser_);
+       break;
+@@ -1839,6 +1848,7 @@ void BrowserCommandController::InitCommandState() {
+   command_updater_->UpdateCommandEnabled(IDC_DEV_TOOLS_DEVICES, true);
+   command_updater_->UpdateCommandEnabled(IDC_DEV_TOOLS_INSPECT, true);
+   command_updater_->UpdateCommandEnabled(IDC_DEV_TOOLS_TOGGLE, true);
++  command_updater_->UpdateCommandEnabled(IDC_FRAMEBUDGET_CYCLE_TAB_FPS, true);
+   command_updater_->UpdateCommandEnabled(IDC_VIEW_SOURCE, true);
+ #if BUILDFLAG(IS_MAC)
+   command_updater_->UpdateCommandEnabled(IDC_TOGGLE_JAVASCRIPT_APPLE_EVENTS,
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+new file mode 100644
+index 0000000000..7c3c157783
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -0,0 +1,16 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++source_set("framebudget") {
++  sources = [
++    "framebudget_tab_helper.cc",
++    "framebudget_tab_helper.h",
++  ]
++  public_deps = [
++    "//base",
++    "//components/viz/common",
++    "//content/public/browser",
++  ]
++  deps = [ "//url" ]
++}
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+new file mode 100644
+index 0000000000..0a029dd33e
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -0,0 +1,177 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
++
++#include <array>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "content/public/browser/frame_rate_throttling.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/web_contents.h"
++#include "url/gurl.h"
++
++namespace {
++
++constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
++constexpr char kSitesSwitch[] = "framebudget-sites";
++
++// Steps of the per-tab override. Stepping past the last one returns the tab to
++// its site rule.
++constexpr std::array<int, 5> kOverrideSteps = {60, 30, 15, 5, 0};
++
++struct Config {
++  int default_fps = 0;
++  // (host, fps) in command line order.
++  std::vector<std::pair<std::string, int>> sites;
++};
++
++// Returns `value` as a positive FPS, or 0 (no limit) if it is not one.
++int ParseFps(std::string_view value) {
++  int fps = 0;
++  return base::StringToInt(value, &fps) && fps > 0 ? fps : 0;
++}
++
++Config ReadConfig() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  Config config;
++  config.default_fps =
++      ParseFps(command_line.GetSwitchValueASCII(kDefaultFpsSwitch));
++  const std::string sites = command_line.GetSwitchValueASCII(kSitesSwitch);
++  for (std::string_view rule :
++       base::SplitStringPiece(sites, ",", base::TRIM_WHITESPACE,
++                              base::SPLIT_WANT_NONEMPTY)) {
++    std::vector<std::string_view> parts = base::SplitStringPiece(
++        rule, "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++    if (parts.size() != 2 || parts[0].empty()) {
++      LOG(WARNING) << "FrameBudget: ignoring malformed site rule: " << rule;
++      continue;
++    }
++    config.sites.emplace_back(base::ToLowerASCII(parts[0]),
++                              ParseFps(parts[1]));
++  }
++  return config;
++}
++
++const Config& GetConfig() {
++  static const base::NoDestructor<Config> config(ReadConfig());
++  return *config;
++}
++
++// Returns the FPS of the first site rule matching `host` or one of its parent
++// domains, or the default FPS.
++int FpsForHost(std::string_view host) {
++  const Config& config = GetConfig();
++  for (const auto& [site, fps] : config.sites) {
++    if (host == site || (host.ends_with(site) &&
++                         host[host.size() - site.size() - 1] == '.')) {
++      return fps;
++    }
++  }
++  return config.default_fps;
++}
++
++}  // namespace
++
++FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
++    : content::WebContentsObserver(web_contents),
++      content::WebContentsUserData<FrameBudgetTabHelper>(*web_contents) {
++  Apply();
++}
++
++FrameBudgetTabHelper::~FrameBudgetTabHelper() = default;
++
++int FrameBudgetTabHelper::CycleTabOverride() {
++  if (!tab_override_fps_) {
++    tab_override_fps_ = kOverrideSteps[0];
++  } else {
++    size_t i = 0;
++    while (i < kOverrideSteps.size() &&
++           kOverrideSteps[i] != *tab_override_fps_) {
++      ++i;
++    }
++    if (i + 1 < kOverrideSteps.size()) {
++      tab_override_fps_ = kOverrideSteps[i + 1];
++    } else {
++      tab_override_fps_.reset();
++    }
++  }
++  Apply();
++  return EffectiveFps();
++}
++
++int FrameBudgetTabHelper::EffectiveFps() const {
++  if (tab_override_fps_) {
++    return *tab_override_fps_;
++  }
++  return FpsForHost(web_contents()->GetLastCommittedURL().host());
++}
++
++void FrameBudgetTabHelper::RenderFrameCreated(
++    content::RenderFrameHost* render_frame_host) {
++  if (render_frame_host == web_contents()->GetPrimaryMainFrame()) {
++    Apply();
++  }
++}
++
++void FrameBudgetTabHelper::RenderFrameHostChanged(
++    content::RenderFrameHost* old_host,
++    content::RenderFrameHost* new_host) {
++  if (new_host && new_host->IsInPrimaryMainFrame()) {
++    Apply();
++  }
++}
++
++void FrameBudgetTabHelper::PrimaryPageChanged(content::Page& page) {
++  Apply();
++}
++
++void FrameBudgetTabHelper::WebContentsDestroyed() {
++  content::SetFrameBudgetForFrameSink(applied_frame_sink_id_,
++                                      base::TimeDelta());
++  applied_frame_sink_id_ = viz::FrameSinkId();
++}
++
++void FrameBudgetTabHelper::Apply() {
++  content::RenderWidgetHost* widget =
++      web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  const viz::FrameSinkId frame_sink_id =
++      widget ? widget->GetFrameSinkId() : viz::FrameSinkId();
++  const int fps = EffectiveFps();
++  const base::TimeDelta interval =
++      fps > 0 ? base::Hertz(fps) : base::TimeDelta();
++  if (frame_sink_id == applied_frame_sink_id_ &&
++      interval == applied_interval_) {
++    return;
++  }
++
++  // The main frame moved to a new widget (e.g. a cross-process navigation).
++  if (applied_frame_sink_id_.is_valid() &&
++      applied_frame_sink_id_ != frame_sink_id) {
++    content::SetFrameBudgetForFrameSink(applied_frame_sink_id_,
++                                        base::TimeDelta());
++  }
++  content::SetFrameBudgetForFrameSink(frame_sink_id, interval);
++  applied_frame_sink_id_ = frame_sink_id;
++  applied_interval_ = interval;
++
++  VLOG(1) << "FrameBudget: "
++          << web_contents()->GetLastCommittedURL().host() << " -> "
++          << (fps > 0 ? base::NumberToString(fps) + " fps" : "no limit")
++          << (tab_override_fps_ ? " (tab override)" : "") << ", frame sink "
++          << frame_sink_id.ToString();
++}
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(FrameBudgetTabHelper);
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+new file mode 100644
+index 0000000000..ca257467cb
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -0,0 +1,62 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_HELPER_H_
++#define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_HELPER_H_
++
++#include <optional>
++
++#include "base/time/time.h"
++#include "components/viz/common/surfaces/frame_sink_id.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++// FrameBudget: limits how often a tab's web content produces frames, while the
++// browser UI and the monitor keep their normal refresh rate.
++//
++// The limit of a tab comes from, in order of priority:
++//  1. A per-tab override, cycled with CycleTabOverride() (Alt+Shift+F).
++//  2. The first rule in --framebudget-sites matching the tab's host or one of
++//     its parent domains, e.g.
++//     --framebudget-sites=youtube.com=60,example.com=15
++//  3. --framebudget-default-fps. No limit when absent.
++// An FPS of 0 means no limit.
++class FrameBudgetTabHelper
++    : public content::WebContentsObserver,
++      public content::WebContentsUserData<FrameBudgetTabHelper> {
++ public:
++  FrameBudgetTabHelper(const FrameBudgetTabHelper&) = delete;
++  FrameBudgetTabHelper& operator=(const FrameBudgetTabHelper&) = delete;
++  ~FrameBudgetTabHelper() override;
++
++  // Steps the per-tab override: site rule -> 60 -> 30 -> 15 -> 5 -> no limit
++  // -> site rule. Returns the FPS now in effect (0 = no limit).
++  int CycleTabOverride();
++
++  // Returns the FPS in effect for this tab (0 = no limit).
++  int EffectiveFps() const;
++
++ private:
++  friend class content::WebContentsUserData<FrameBudgetTabHelper>;
++
++  explicit FrameBudgetTabHelper(content::WebContents* web_contents);
++
++  // content::WebContentsObserver:
++  void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
++  void RenderFrameHostChanged(content::RenderFrameHost* old_host,
++                              content::RenderFrameHost* new_host) override;
++  void PrimaryPageChanged(content::Page& page) override;
++  void WebContentsDestroyed() override;
++
++  // Sends the tab's limit to viz when its frame sink or FPS has changed.
++  void Apply();
++
++  std::optional<int> tab_override_fps_;
++  viz::FrameSinkId applied_frame_sink_id_;
++  base::TimeDelta applied_interval_;
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++#endif  // CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_HELPER_H_
+diff --git a/chrome/browser/ui/tab_helpers.cc b/chrome/browser/ui/tab_helpers.cc
+index f7e2862c79..dff0dfb2da 100644
+--- a/chrome/browser/ui/tab_helpers.cc
++++ b/chrome/browser/ui/tab_helpers.cc
+@@ -69,6 +69,7 @@
+ #include "chrome/browser/ui/autofill/autofill_client_provider.h"
+ #include "chrome/browser/ui/autofill/autofill_client_provider_factory.h"
+ #include "chrome/browser/ui/find_bar/find_bar_state.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ #include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
+ #include "chrome/browser/ui/prefs/prefs_tab_helper.h"
+ #include "chrome/browser/ui/recently_audible_helper.h"
+@@ -454,6 +455,7 @@ void TabHelpers::AttachTabHelpers(WebContents* web_contents,
+     predictors::LoadingPredictorTabHelper::CreateForWebContents(web_contents);
+   }
+   PrefsTabHelper::CreateForWebContents(web_contents);
++  FrameBudgetTabHelper::CreateForWebContents(web_contents);
+   RecentlyAudibleHelper::CreateForWebContents(web_contents);
+ #if BUILDFLAG(IS_ANDROID)
+   RequestDesktopSiteWebContentsObserverAndroid::CreateForWebContents(

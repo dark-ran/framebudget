@@ -1,0 +1,303 @@
+From 824f13b00dd33584ba9b89133bf1f5d08440d0dd Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 18:55:02 +0900
+Subject: [PATCH 1/6] =?UTF-8?q?viz:=20=ED=94=84=EB=A0=88=EC=9E=84=20?=
+ =?UTF-8?q?=EC=8B=B1=ED=81=AC=EB=B3=84=20FrameBudget=20=EA=B0=84=EA=B2=A9?=
+ =?UTF-8?q?=20=EC=B6=94=EA=B0=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FrameSinkManager에 frame_sink_id별 프레임 간격을 설정하는 SetFrameBudgetInterval을 추가한다.
+mojom, 호스트/서비스 구현, content 공개 API(frame_rate_throttling.h)를 함께 바꾼다.
+---
+ .../viz/host/host_frame_sink_manager.cc       |  6 +++
+ components/viz/host/host_frame_sink_manager.h |  2 +
+ .../frame_sinks/frame_sink_manager_impl.cc    | 54 +++++++++++++++++--
+ .../frame_sinks/frame_sink_manager_impl.h     | 19 +++++--
+ components/viz/test/test_frame_sink_manager.h |  2 +
+ .../frame_rate_throttling.cc                  | 11 ++++
+ .../public/browser/frame_rate_throttling.h    | 17 ++++++
+ .../compositing/frame_sink_manager.mojom      |  9 ++++
+ 8 files changed, 111 insertions(+), 9 deletions(-)
+
+diff --git a/components/viz/host/host_frame_sink_manager.cc b/components/viz/host/host_frame_sink_manager.cc
+index 0b89f0ae3e..970a48890a 100644
+--- a/components/viz/host/host_frame_sink_manager.cc
++++ b/components/viz/host/host_frame_sink_manager.cc
+@@ -453,6 +453,12 @@ void HostFrameSinkManager::StopThrottlingAllFrameSinks() {
+   frame_sink_manager_->StopThrottlingAllFrameSinks();
+ }
+ 
++void HostFrameSinkManager::SetFrameBudgetInterval(
++    const FrameSinkId& frame_sink_id,
++    base::TimeDelta interval) {
++  frame_sink_manager_->SetFrameBudgetInterval(frame_sink_id, interval);
++}
++
+ void HostFrameSinkManager::AddHitTestRegionObserver(
+     HitTestRegionObserver* observer) {
+   observers_.AddObserver(observer);
+diff --git a/components/viz/host/host_frame_sink_manager.h b/components/viz/host/host_frame_sink_manager.h
+index 891beb58a3..f3ee7f4322 100644
+--- a/components/viz/host/host_frame_sink_manager.h
++++ b/components/viz/host/host_frame_sink_manager.h
+@@ -326,6 +326,8 @@ class VIZ_HOST_EXPORT HostFrameSinkManager
+   void Throttle(const std::vector<FrameSinkId>& ids, base::TimeDelta interval);
+   void StartThrottlingAllFrameSinks(base::TimeDelta interval);
+   void StopThrottlingAllFrameSinks();
++  void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
++                              base::TimeDelta interval);
+ 
+   // HitTestDataProvider implementation.
+   void AddHitTestRegionObserver(HitTestRegionObserver* observer) override;
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index 2be3e5291b..36cf6a8612 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -234,6 +234,7 @@ void FrameSinkManagerImpl::InvalidateFrameSinkId(
+   root_sink_map_.erase(frame_sink_id);
+ 
+   frame_sink_data_.erase(frame_sink_id);
++  frame_budget_intervals_.erase(frame_sink_id);
+ }
+ 
+ void FrameSinkManagerImpl::RequestNonEmptyFrameNotification(
+@@ -1247,12 +1248,14 @@ void FrameSinkManagerImpl::UpdateThrottlingRecursively(
+ 
+   bool check_throttles = ThrottleIntervalHasEffect();
+   bool check_captures = !captured_frame_sink_ids_.empty();
++  bool check_budgets = !frame_budget_intervals_.empty();
+ 
+-  if (!check_throttles && !check_captures) {
++  if (!check_throttles && !check_captures && !check_budgets) {
+     return;
+   }
+ 
+   base::flat_set<FrameSinkId> throttles;
++  base::flat_map<FrameSinkId, base::TimeDelta> budgets;
+   base::flat_set<FrameSinkId> captures;
+ 
+   // Identify anything which would affect throttling from ancestors or
+@@ -1268,6 +1271,13 @@ void FrameSinkManagerImpl::UpdateThrottlingRecursively(
+     if (check_throttles && frame_sink_ids_to_throttle_.contains(id)) {
+       throttles.insert(root);
+     }
++    if (check_budgets) {
++      auto it = frame_budget_intervals_.find(id);
++      if (it != frame_budget_intervals_.end()) {
++        base::TimeDelta& budget = budgets[root];
++        budget = std::max(budget, it->second);
++      }
++    }
+     if (check_captures && captured_frame_sink_ids_.contains(id)) {
+       captures.insert(root);
+     }
+@@ -1284,7 +1294,7 @@ void FrameSinkManagerImpl::UpdateThrottlingRecursively(
+   });
+ 
+   // Apply the identified rules.
+-  ApplyThrottlingRules(throttles, captures);
++  ApplyThrottlingRules(throttles, budgets, captures);
+ }
+ 
+ void FrameSinkManagerImpl::Throttle(const std::vector<FrameSinkId>& ids,
+@@ -1305,20 +1315,55 @@ void FrameSinkManagerImpl::StopThrottlingAllFrameSinks() {
+   UpdateThrottling();
+ }
+ 
++void FrameSinkManagerImpl::SetFrameBudgetInterval(
++    const FrameSinkId& frame_sink_id,
++    base::TimeDelta interval) {
++  if (interval.is_positive()) {
++    frame_budget_intervals_[frame_sink_id] = interval;
++  } else {
++    frame_budget_intervals_.erase(frame_sink_id);
++  }
++  UpdateThrottling();
++}
++
+ void FrameSinkManagerImpl::ApplyThrottlingRules(
+     const base::flat_set<FrameSinkId>& throttled_roots,
++    const base::flat_map<FrameSinkId, base::TimeDelta>& budget_roots,
+     const base::flat_set<FrameSinkId>& captured_roots) {
+   // Apply throttling
++  base::flat_set<FrameSinkId> throttled;
+   if (ThrottleIntervalHasEffect()) {
+     for (const auto& id : throttled_roots) {
+-      RecurseChildren(id, [this](const FrameSinkId& frame_sink_id) {
++      RecurseChildren(id, [this, &throttled](const FrameSinkId& frame_sink_id) {
+         if (auto* support = GetFrameSinkForId(frame_sink_id)) {
+           support->SetThrottleInterval(throttle_interval_);
++          throttled.insert(frame_sink_id);
+         }
+       });
+     }
+   }
+ 
++  // FrameBudget: each frame sink gets the longest budget among the budget
++  // roots above it, and only if that is longer than the interval set so far.
++  base::flat_map<FrameSinkId, base::TimeDelta> budgets;
++  for (const auto& [root, interval] : budget_roots) {
++    RecurseChildren(root,
++                    [&budgets, interval](const FrameSinkId& frame_sink_id) {
++                      base::TimeDelta& budget = budgets[frame_sink_id];
++                      budget = std::max(budget, interval);
++                    });
++  }
++  const base::TimeDelta global_throttle =
++      global_throttle_interval_.value_or(base::TimeDelta());
++  for (const auto& [frame_sink_id, budget] : budgets) {
++    if (auto* support = GetFrameSinkForId(frame_sink_id)) {
++      const base::TimeDelta current = throttled.contains(frame_sink_id)
++                                          ? throttle_interval_
++                                          : global_throttle;
++      support->SetThrottleInterval(std::max(budget, current));
++    }
++  }
++
+   // Do not allow throttling on frame sinks currently being captured.
+   for (const auto& id : captured_roots) {
+     RecurseChildren(id, [this](const FrameSinkId& frame_sink_id) {
+@@ -1340,7 +1385,8 @@ void FrameSinkManagerImpl::UpdateThrottling() {
+     support->SetAllowThrottling(true);
+   }
+ 
+-  ApplyThrottlingRules(frame_sink_ids_to_throttle_, captured_frame_sink_ids_);
++  ApplyThrottlingRules(frame_sink_ids_to_throttle_, frame_budget_intervals_,
++                       captured_frame_sink_ids_);
+ }
+ 
+ bool FrameSinkManagerImpl::ThrottleIntervalHasEffect() const {
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.h b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+index 43b8df9abf..09502fc0bb 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.h
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+@@ -205,6 +205,8 @@ class VIZ_SERVICE_EXPORT FrameSinkManagerImpl
+                 base::TimeDelta interval) override;
+   void StartThrottlingAllFrameSinks(base::TimeDelta interval) override;
+   void StopThrottlingAllFrameSinks() override;
++  void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
++                              base::TimeDelta interval) override;
+   void ClearUnclaimedViewTransitionResources(
+       const blink::ViewTransitionToken& transition_token) override;
+   void CreateMetricsRecorderForTest(
+@@ -542,11 +544,14 @@ class VIZ_SERVICE_EXPORT FrameSinkManagerImpl
+   // requires throttling on affected frame sinks to be started or stopped.
+   void UpdateThrottling();
+ 
+-  // Applies throttling to all descendants of `throttled_roots`, and disables
+-  // throttling for all descendants of `captured_roots` (e.g. during video
+-  // capture).
+-  void ApplyThrottlingRules(const base::flat_set<FrameSinkId>& throttled_roots,
+-                            const base::flat_set<FrameSinkId>& captured_roots);
++  // Applies throttling to all descendants of `throttled_roots`, lengthens the
++  // interval of all descendants of `budget_roots` to their FrameBudget
++  // interval, and disables throttling for all descendants of `captured_roots`
++  // (e.g. during video capture).
++  void ApplyThrottlingRules(
++      const base::flat_set<FrameSinkId>& throttled_roots,
++      const base::flat_map<FrameSinkId, base::TimeDelta>& budget_roots,
++      const base::flat_set<FrameSinkId>& captured_roots);
+ 
+   // Check to see if |throttle_interval_| has any effect. For example if
+   // |global_throttle_interval_| is longer then |throttle_interval| it will
+@@ -672,6 +677,10 @@ class VIZ_SERVICE_EXPORT FrameSinkManagerImpl
+   // often BeginFrames are sent for all current and future frame sinks.
+   std::optional<base::TimeDelta> global_throttle_interval_ = std::nullopt;
+ 
++  // FrameBudget: per-frame-sink minimum BeginFrame intervals, each applying to
++  // the frame sink and all its descendants. See SetFrameBudgetInterval().
++  base::flat_map<FrameSinkId, base::TimeDelta> frame_budget_intervals_;
++
+ #if BUILDFLAG(IS_ANDROID)
+   base::flat_map<uint32_t, base::ScopedClosureRunner> cached_back_buffers_;
+ #endif
+diff --git a/components/viz/test/test_frame_sink_manager.h b/components/viz/test/test_frame_sink_manager.h
+index 629ce42bc7..1a7bae28ac 100644
+--- a/components/viz/test/test_frame_sink_manager.h
++++ b/components/viz/test/test_frame_sink_manager.h
+@@ -94,6 +94,8 @@ class TestFrameSinkManagerImpl : public mojom::FrameSinkManager {
+                 base::TimeDelta interval) override {}
+   void StartThrottlingAllFrameSinks(base::TimeDelta interval) override {}
+   void StopThrottlingAllFrameSinks() override {}
++  void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
++                              base::TimeDelta interval) override {}
+   void ClearUnclaimedViewTransitionResources(
+       const blink::ViewTransitionToken& transition_token) override {}
+   void CreateMetricsRecorderForTest(
+diff --git a/content/browser/performance_manager/frame_rate_throttling.cc b/content/browser/performance_manager/frame_rate_throttling.cc
+index b4183ae414..5341935cf2 100644
+--- a/content/browser/performance_manager/frame_rate_throttling.cc
++++ b/content/browser/performance_manager/frame_rate_throttling.cc
+@@ -53,4 +53,15 @@ CONTENT_EXPORT void UpdateThrottlingFrameSinks(
+   GetHostFrameSinkManager()->Throttle(sink_ids_vector, interval);
+ }
+ 
++CONTENT_EXPORT void SetFrameBudgetForFrameSink(
++    const viz::FrameSinkId& frame_sink_id,
++    base::TimeDelta interval) {
++  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M160);
++  // viz::HostFrameSinkManager is not available in some unittest.
++  if (!GetHostFrameSinkManager() || !frame_sink_id.is_valid()) {
++    return;
++  }
++  GetHostFrameSinkManager()->SetFrameBudgetInterval(frame_sink_id, interval);
++}
++
+ }  // namespace content
+diff --git a/content/public/browser/frame_rate_throttling.h b/content/public/browser/frame_rate_throttling.h
+index deb93c7954..d741ba674e 100644
+--- a/content/public/browser/frame_rate_throttling.h
++++ b/content/public/browser/frame_rate_throttling.h
+@@ -11,6 +11,10 @@
+ #include "content/common/content_export.h"
+ #include "content/public/browser/global_routing_id.h"
+ 
++namespace viz {
++class FrameSinkId;
++}
++
+ namespace content {
+ 
+ // Signals the frame sink manager that all current and future frame sinks should
+@@ -52,6 +56,19 @@ CONTENT_EXPORT void UpdateThrottlingFrameSinks(
+     const std::set<GlobalRenderFrameHostId>& throttle_frames,
+     base::TimeDelta interval);
+ 
++// FrameBudget: limits `frame_sink_id` and all its descendant sinks (e.g.
++// out-of-process iframes) to send BeginFrames at an interval at least as long
++// as `interval`. Each frame sink keeps its own limit, independently of the
++// functions above, so different tabs can run at different frame rates. The
++// limit never shortens an interval chosen by the functions above. A zero
++// `interval` removes the limit, and it is dropped automatically when the frame
++// sink goes away.
++//
++// Should be called from the UI thread.
++CONTENT_EXPORT void SetFrameBudgetForFrameSink(
++    const viz::FrameSinkId& frame_sink_id,
++    base::TimeDelta interval);
++
+ }  // namespace content
+ 
+ #endif  // CONTENT_PUBLIC_BROWSER_FRAME_RATE_THROTTLING_H_
+diff --git a/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom b/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
+index a360316b8f..84f9c71a33 100644
+--- a/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
++++ b/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
+@@ -218,6 +218,15 @@ interface FrameSinkManager {
+   // If throttling is already disabled, this has no effect.
+   StopThrottlingAllFrameSinks();
+ 
++  // FrameBudget: limits |frame_sink_id| and all its descendant sinks to send
++  // BeginFrames at an interval at least as long as |interval|. Unlike
++  // Throttle(), each frame sink keeps its own interval, so different tabs can
++  // run at different frame rates. This only ever lengthens the interval chosen
++  // by the other throttling rules. A zero |interval| removes the limit. The
++  // limit is dropped when |frame_sink_id| is invalidated.
++  SetFrameBudgetInterval(
++      FrameSinkId frame_sink_id, mojo_base.mojom.TimeDelta interval);
++
+   // Takes a snapshot of |surface_id| or a newer surface with the same
+   // FrameSinkId. The request will be queued up until such surface exists and is
+   // reachable from the root surface.

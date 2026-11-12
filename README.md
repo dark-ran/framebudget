@@ -86,14 +86,17 @@ viz FrameSinkManager (GPU 프로세스)
 - [x] Chromium 패치 초안: viz·content 프레임 싱크별 제한
 - [x] Chromium 패치 초안: 사이트·탭별 정책, 단축키
 - [x] Chromium 패치 초안: 설정 화면, 상태 표시, 입력 시 해제
-- [ ] Ubuntu 빌드 스크립트, 패치 빌드·동작 검증
+- [x] Ubuntu에서 패치 빌드, 기본 동작 확인 ([빌드 방법](chromium/README.md))
 - [ ] 빌드한 FrameBudget으로 전력 재측정 (Firefox 결과와 비교)
 - [ ] 사이트별 "입력 시 해제" 끄기 (게임처럼 계속 입력하는 사이트용)
 - [ ] 고주사율(120·144Hz) 모니터, 외장 GPU 환경 측정
 - [ ] 저화질 강제 (Canvas·WebGL 내부 해상도, 이미지 품질) 실험
 
-패치 초안은 Chromium `156.0.8078.48` 원본 소스에 적용되는 것까지 확인했으며, 빌드와 실제 동작 검증은 진행 중입니다.
+패치는 Chromium `156.0.8078.48`에 적용해 Ubuntu에서 빌드했습니다. 헤드리스 모드에서 사이트 규칙대로 페이지의 프레임이 60·30·15FPS로 제한되는 것을 확인했습니다. 창 모드 동작, CSS 애니메이션 제한, 전력 측정은 아직 확인하지 않았습니다. 자세한 내용은 [Chromium 빌드 문서](chromium/README.md)에 있습니다.
 
 ## 라이선스
 
-[BSD-3-Clause](LICENSE). Chromium과 같은 라이선스입니다.
+이 저장소의 코드는 [BSD-3-Clause](LICENSE)입니다. Chromium과 같은 라이선스입니다.
+
+- [`chromium/patches/`](chromium/patches)는 [Chromium](https://www.chromium.org/) 소스를 수정하는 패치입니다. 기존 Chromium 파일을 고친 부분은 Chromium 라이선스([원문](chromium/LICENSE.chromium), Copyright The Chromium Authors)를 따릅니다. 범위는 [Chromium 빌드 문서](chromium/README.md#출처와-라이선스)에 정리했습니다.
+- 이 프로젝트는 Google이나 Chromium 프로젝트와 관련이 없습니다. "Chrome"은 Google LLC의 상표입니다.

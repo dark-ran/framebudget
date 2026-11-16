@@ -1,0 +1,52 @@
+From 29551b9b46e297572461b0a4e92f6204ff549252 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:11:42 +0900
+Subject: [PATCH] =?UTF-8?q?fix:=20Alt+Shift+F=20=EB=8B=A8=EC=B6=95?=
+ =?UTF-8?q?=ED=82=A4=EA=B0=80=20=EB=8F=99=EC=9E=91=ED=95=98=EC=A7=80=20?=
+ =?UTF-8?q?=EC=95=8A=EB=8D=98=20=EB=AC=B8=EC=A0=9C=20=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Chromium 156은 kUseActionsForBrowserCommands가 켜져 있으면 명령 등록부로
+CommandActionUpdater를 쓴다. 이 등록부는 액션 표에 있는 명령만 인정하므로
+IDC_FRAMEBUDGET_CYCLE_TAB_FPS는 SupportsCommand가 false가 되어 버려졌다.
+단축키 통계에는 명령이 기록되지만 탭 고정 값이 바뀌지 않는 것으로 확인했다.
+BrowserView::AcceleratorPressed에서 이 명령을 탭 헬퍼로 직접 넘긴다.
+---
+ chrome/browser/ui/views/frame/browser_view.cc | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index b68f089aeb..d916437dd5 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -99,6 +99,7 @@
+ #include "chrome/browser/ui/exclusive_access/fullscreen_tab_params.h"
+ #include "chrome/browser/ui/find_bar/find_bar.h"
+ #include "chrome/browser/ui/focus/browser_focus_controller.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ #include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+ #include "chrome/browser/ui/global_error/global_error.h"
+ #include "chrome/browser/ui/global_error/global_error_service.h"
+@@ -5263,6 +5264,17 @@ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
+ 
+   UpdateAcceleratorMetrics(accelerator, command_id);
+ 
++  // FrameBudget has no action item, so the actions-based command updater
++  // would drop it. Handle the shortcut directly.
++  if (command_id == IDC_FRAMEBUDGET_CYCLE_TAB_FPS) {
++    if (content::WebContents* contents = GetActiveWebContents()) {
++      if (auto* helper = FrameBudgetTabHelper::FromWebContents(contents)) {
++        helper->CycleTabOverride();
++      }
++    }
++    return true;
++  }
++
+   if (command_id == IDC_CLEAR_BROWSING_DATA) {
+     views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
+         browsing_data_important_sites_util::
+-- 
+2.53.0
+

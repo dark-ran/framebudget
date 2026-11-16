@@ -87,11 +87,33 @@ out/Default/chrome
 
 `chrome://framebudget` 페이지가 열리고, 실행 옵션으로 준 규칙이 화면에 표시되는 것도 확인했습니다.
 
+### 자동 점검 스크립트
+
+[`tests/headless_check.mjs`](tests/headless_check.mjs)는 빌드한 브라우저를 헤드리스로 띄워 DevTools 프로토콜(CDP)로 아래 항목을 확인합니다. Node 22 이상만 있으면 되고, 시험 페이지도 스스로 띄웁니다.
+
+```bash
+node chromium/tests/headless_check.mjs out/Default/chrome --no-sandbox
+```
+
+`--no-sandbox`는 Ubuntu 23.10 이후처럼 AppArmor가 사용자 네임스페이스를 막아 `No usable sandbox!`로 실행이 안 될 때만 붙입니다. 로컬 시험 페이지만 여는 점검용입니다.
+
+2026-11-16 결과 (1초 단위 값):
+
+| 항목 | 제한 없음 | `127.0.0.1=15` |
+|---|---|---|
+| rAF 콜백 수 | 60, 60, 60 | 15, 15, 15 |
+| 휠 입력을 2초 동안 보내는 중 | — | 33, 60 |
+| 입력을 멈추고 1.5초 뒤 | — | 15, 15 |
+| CSS 애니메이션만 있는 페이지의 DrawFrame 수 (3초 평균) | 60 | 15 |
+
+- **CSS 애니메이션도 제한됩니다.** 스크립트 없이 CSS `@keyframes`만 쓰는 페이지에서도 렌더러가 그리는 프레임이 15로 줄었습니다. 페이지 스크립트만 솎아내는 확장 프로그램 방식으로는 줄지 않던 부분입니다.
+- **입력 중에는 제한이 풀리고, 입력이 멈추면 다시 걸립니다.** 첫 칸의 33은 1초 구간 중간에 해제가 시작됐기 때문입니다.
+- 프레임 수는 화면 캡처(screencast)가 아니라 tracing으로 셉니다. 화면 캡처 중에는 기존 규칙에 따라 제한이 풀리기 때문입니다. 실제로 screencast로 세면 15FPS 규칙에서도 60이 나옵니다.
+
 아직 확인하지 않은 것:
 
 - 창을 띄운 일반 모드에서의 동작
-- CSS 애니메이션 제한
-- 입력 시 제한 해제, Alt+Shift+F 단축키, 상태 표시
+- Alt+Shift+F 단축키와 창 아래쪽 상태 표시. CDP로 보낸 키는 브라우저 단축키로 전달되지 않습니다(`content/browser/devtools/protocol/input_handler.cc`에서 `skip_if_unhandled = true`). 그래서 실제 키 입력으로 따로 확인해야 합니다.
 - 전력 절감량 (FrameBudget 빌드로 다시 측정할 예정)
 
 ## 출처와 라이선스

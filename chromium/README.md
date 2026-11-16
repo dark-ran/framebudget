@@ -18,13 +18,14 @@ FrameBudget 기능은 Chromium 원본 소스에 적용하는 패치로 제공합
 | 0005 | 수정: `framebudget_ui.cc` 컴파일 오류 1건 |
 | 0006 | 설정 화면 안내 문구 정리 |
 | 0007 | 새로 작성한 파일의 저작권자 표기 수정 |
+| 0008 | 수정: Alt+Shift+F 단축키가 동작하지 않던 문제 |
 
-0004와 0005는 첫 빌드에서 나온 오류를 고친 기록입니다. 기능 패치에 합치지 않고 따로 남겼습니다.
+0004, 0005, 0008은 빌드와 시험에서 나온 오류를 고친 기록입니다. 기능 패치에 합치지 않고 따로 남겼습니다.
 
 - `GURL::host()`가 `std::string_view`를 돌려주는데 `std::string`으로 암시 변환하고 있었습니다.
 - `BrowserContext`가 전방 선언만 되어 있어서 `UserPrefs::Get()`에 넘길 수 없었습니다.
 
-7개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
+8개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
 
 ## 빌드 방법
 
@@ -110,10 +111,31 @@ node chromium/tests/headless_check.mjs out/Default/chrome --no-sandbox
 - **입력 중에는 제한이 풀리고, 입력이 멈추면 다시 걸립니다.** 첫 칸의 33은 1초 구간 중간에 해제가 시작됐기 때문입니다.
 - 프레임 수는 화면 캡처(screencast)가 아니라 tracing으로 셉니다. 화면 캡처 중에는 기존 규칙에 따라 제한이 풀리기 때문입니다. 실제로 screencast로 세면 15FPS 규칙에서도 60이 나옵니다.
 
+### 창 모드 확인
+
+가상 화면(Xvfb)에 일반 창으로 띄우고, 실제 X 키 입력(xdotool)으로 확인했습니다 (2026-11-16, `127.0.0.1=15` 규칙).
+
+| 동작 | 초당 rAF |
+|---|---|
+| 창 모드, 규칙만 적용 | 15, 15, 15 |
+| Alt+Shift+F 1회 | 60, 60 |
+| Alt+Shift+F 2회 | 30, 30 |
+| Alt+Shift+F 3회 | 15, 15 |
+
+누를 때마다 창 왼쪽 아래에 상태가 2초 동안 표시됩니다.
+
+![Alt+Shift+F를 누른 뒤 창 왼쪽 아래의 상태 표시](../docs/images/status-indicator.png)
+
+![chrome://framebudget 설정 화면](../docs/images/settings-page.png)
+
+**0008에서 고친 문제:** 처음에는 Alt+Shift+F를 눌러도 FPS가 바뀌지 않았습니다.
+
+- **확인한 것:** `chrome://histograms`의 `Browser.Shortcuts.TriggeredCommandId`에는 FrameBudget 명령(40390)이 기록됐습니다. 단축키는 눌렸는데 명령이 실행되지 않은 것입니다.
+- **원인:** Chromium 156은 `kUseActionsForBrowserCommands`가 켜져 있으면 명령 등록부로 `CommandActionUpdater`를 씁니다. 이 등록부는 액션 표에 있는 명령만 인정합니다. 그래서 `SupportsCommand`가 false가 되어 FrameBudget 명령이 버려졌습니다.
+- **수정:** `BrowserView::AcceleratorPressed`에서 이 명령을 탭 헬퍼로 바로 넘깁니다.
+
 아직 확인하지 않은 것:
 
-- 창을 띄운 일반 모드에서의 동작
-- Alt+Shift+F 단축키와 창 아래쪽 상태 표시. CDP로 보낸 키는 브라우저 단축키로 전달되지 않습니다(`content/browser/devtools/protocol/input_handler.cc`에서 `skip_if_unhandled = true`). 그래서 실제 키 입력으로 따로 확인해야 합니다.
 - 전력 절감량 (FrameBudget 빌드로 다시 측정할 예정)
 
 ## 출처와 라이선스

@@ -212,6 +212,9 @@ def sample_counters_linux(seconds):
     except PermissionError:
         raise RuntimeError("RAPL 에너지 카운터를 읽을 수 없습니다. root 권한이 필요합니다. "
                            "sudo chmod a+r /sys/class/powercap/intel-rapl:*/energy_uj 를 실행한 뒤 다시 시도하세요.")
+    # 외장 NVIDIA GPU 전력은 RAPL에 잡히지 않으므로 nvidia-smi로 1초마다 따로 읽는다
+    smi = subprocess.Popen(["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits", "-lms", "1000"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True) if shutil.which("nvidia-smi") else None
     for _ in range(seconds):
         t0 = time.monotonic()
         time.sleep(1)
@@ -223,8 +226,14 @@ def sample_counters_linux(seconds):
         if total > prev_total:
             series["cpu_pct"].append(100 * (1 - (idle - prev_idle) / (total - prev_total)))
         prev, prev_idle, prev_total = cur, idle, total
+    dgpu = []
+    if smi:
+        smi.terminate()
+        dgpu = [float(x) for x in smi.communicate()[0].split() if x.replace(".", "", 1).isdigit()]
     result = {k: round(statistics.mean(v), 3) if v else None for k, v in series.items()}
-    result.update(gpu3d_pct=None, gpu3d_other_pct=None, samples=len(series["pkg_w"]))
+    result.update(gpu3d_pct=None, gpu3d_other_pct=None, samples=len(series["pkg_w"]),
+                  dgpu_w=round(statistics.mean(dgpu), 3) if dgpu else None)
+    result["total_w"] = round(result["pkg_w"] + result["dgpu_w"], 3) if result["pkg_w"] and dgpu else None
     return result
 
 
@@ -264,7 +273,7 @@ def sample_counters(seconds, pids=frozenset()):
 
 # ---- 브라우저 실행 ----
 
-def launch(browser, exe, profile, url, browser_fps, headless=False):
+def launch(browser, exe, profile, url, browser_fps, headless=False, extra=()):
     """browser_fps: 브라우저 수준 FPS 상한 (0은 제한 없음).
     Firefox는 layout.frame_rate, Chromium 계열은 FrameBudget 패치의 --framebudget-default-fps로 건다.
     headless: 창을 띄우지 않는다. 소프트웨어 렌더링이라 GPU 장면의 결과는 실제 화면과 다를 수 있다."""
@@ -278,7 +287,7 @@ def launch(browser, exe, profile, url, browser_fps, headless=False):
         args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
                 "--disable-extensions", "--disable-sync", "--hide-crash-restore-bubble",
                 "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-                "--headless=new" if headless else "--kiosk", url]
+                *extra, "--headless=new" if headless else "--kiosk", url]
         if browser_fps:
             args.insert(1, f"--framebudget-default-fps={browser_fps}")
     return subprocess.Popen(args)
@@ -331,7 +340,8 @@ def summarize(runs, scenes, labels):
     static_floor = median([r for r in runs if r["scene"] == "static" and r["condition"] == "none"], "pkg_w")
     out = []
     for scene in scenes:
-        base = median([r for r in runs if r["scene"] == scene and r["condition"] == "none"], "pkg_w")
+        none_rs = [r for r in runs if r["scene"] == scene and r["condition"] == "none"]
+        base, base_total = median(none_rs, "pkg_w"), median(none_rs, "total_w")
         for label in labels:
             rs = [r for r in runs if r["scene"] == scene and r["condition"] == label]
             if not rs:
@@ -343,6 +353,10 @@ def summarize(runs, scenes, labels):
                 "pkg_w": pkg, "cores_w": median(rs, "cores_w"), "gfx_w": median(rs, "gfx_w"),
                 "cpu_pct": median(rs, "cpu_pct"), "gpu3d_pct": median(rs, "gpu3d_pct"),
                 "gpu3d_other_pct": median(rs, "gpu3d_other_pct"),
+                "dgpu_w": median(rs, "dgpu_w"), "total_w": median(rs, "total_w"),
+                # CPU 패키지 + 외장 GPU 합계의 '제한 없음' 대비 변화율
+                "total_vs_none_pct": (round((median(rs, "total_w") - base_total) / base_total * 100, 1)
+                                      if base_total and median(rs, "total_w") else None),
                 # 같은 장면의 '제한 없음' 대비 패키지 전력 변화율
                 "pkg_vs_none_pct": round((pkg - base) / base * 100, 1) if base and pkg else None,
                 # 정적 문서(바닥 전력) 위에 이 장면이 추가로 쓰는 전력
@@ -361,8 +375,8 @@ def write_csv(path, rows):
 
 
 def print_table(rows):
-    cols = ["scene", "condition", "n", "fps", "pkg_w", "gfx_w", "cores_w", "gpu3d_pct", "gpu3d_other_pct",
-            "pkg_vs_none_pct", "extra_w"]
+    cols = ["scene", "condition", "n", "fps", "pkg_w", "cores_w", "dgpu_w", "total_w",
+            "pkg_vs_none_pct", "total_vs_none_pct", "extra_w"]
     table = [cols] + [[("-" if r[c] is None else str(r[c])) for c in cols] for r in rows]
     widths = [max(len(row[i]) for row in table) for i in range(len(cols))]
     for row in table:
@@ -384,6 +398,8 @@ def main():
     ap.add_argument("--cooldown", type=int, default=10, help="실행 사이 대기(초)")
     ap.add_argument("--settle", type=int, default=20, help="첫 실행 전 시스템 안정화 대기(초)")
     ap.add_argument("--page-args", default="", help="페이지에 그대로 넘길 쿼리. 예: iters=32&particles=8000")
+    ap.add_argument("--browser-arg", action="append", default=[],
+                    help="Chromium 계열에 그대로 넘길 실행 옵션. 여러 번 쓸 수 있음. 예: --browser-arg=--no-sandbox")
     ap.add_argument("--headless", action="store_true",
                     help="창을 띄우지 않고 측정. 기본값(전체 화면 kiosk)은 실제 화면 조건에 가깝다")
     args = ap.parse_args()
@@ -443,7 +459,8 @@ def main():
                         url += "&" + args.page_args
                     inbox.expect(run_id)
                     ac = on_ac_power()
-                    proc = launch(args.browser, exe, profile, url, cap if args.method in ("pref", "budget") else 0, args.headless)
+                    proc = launch(args.browser, exe, profile, url, cap if args.method in ("pref", "budget") else 0, args.headless,
+                                  args.browser_arg)
                     try:
                         if not inbox.begin.wait(args.warmup + 60):
                             raise RuntimeError("페이지가 측정을 시작하지 않았습니다")
@@ -462,7 +479,7 @@ def main():
                            "on_ac": ac and on_ac_power(), "viewport": page["viewport"], "dpr": page["dpr"]}
                     runs.append(row)
                     print(f"[{n}/{total}] {scene:6} {label:7} fps={row['fps']:6}  pkg={row['pkg_w']}W "
-                          f"gfx={row['gfx_w']}W gpu3d={row['gpu3d_pct']}% (다른 프로세스 {row['gpu3d_other_pct']}%)")
+                          f"dgpu={row['dgpu_w']}W total={row['total_w']}W")
                     time.sleep(args.cooldown)
     finally:
         server.shutdown()

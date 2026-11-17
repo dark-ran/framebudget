@@ -31,7 +31,9 @@ async function launch(flags) {
     proc.stderr.on('data', d => { buf += d; const m = buf.match(/DevTools listening on ws:\/\/[^:]+:(\d+)/); if (m) resolve(m[1]); });
     proc.on('exit', c => reject(new Error(`chrome 종료(${c}): ${buf.slice(-500)}`)));
   });
-  return {port, close: () => { proc.kill(); rmSync(profile, {recursive: true, force: true}); }};
+  const exited = new Promise(r => proc.once('exit', r));
+  // 브라우저가 프로필을 다 쓰고 끝난 뒤에 지웁니다.
+  return {port, close: async () => { proc.kill(); await exited; rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 300}); }};
 }
 
 async function open(port, url) {
@@ -72,7 +74,7 @@ async function drawFramesPerSec(p, sec) {
   return +(count / sec).toFixed(1);
 }
 
-async function run(label, flags, withInput) {
+async function run(label, flags, withInput, withCss = true) {
   const b = await launch(flags);
   const out = {label};
   try {
@@ -91,11 +93,13 @@ async function run(label, flags, withInput) {
       out.raf_after_wheel = await rafPerSec(p, 2);
     }
     p.close();
-    const c = await open(b.port, `${base}/css.html`);
-    out.css_draw_frames = await drawFramesPerSec(c, 3);
-    c.close();
+    if (withCss) {
+      const c = await open(b.port, `${base}/css.html`);
+      out.css_draw_frames = await drawFramesPerSec(c, 3);
+      c.close();
+    }
   } finally {
-    b.close();
+    await b.close();
   }
   return out;
 }
@@ -103,11 +107,13 @@ async function run(label, flags, withInput) {
 const results = [
   await run('제한 없음', [], false),
   await run('127.0.0.1=15', ['--framebudget-sites=127.0.0.1=15'], true),
+  await run('127.0.0.1=15, 입력 시 해제 끔',
+            ['--framebudget-sites=127.0.0.1=15', '--framebudget-no-input-boost=127.0.0.1'], true, false),
 ];
 console.log(JSON.stringify(results, null, 1));
 
 // 자체 점검: 기대 범위를 벗어나면 종료 코드 1
-const [free, fb] = results;
+const [free, fb, noBoost] = results;
 const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
 const checks = {
   '제한 없음 rAF ≈ 60': median(free.raf) >= 55,
@@ -116,6 +122,7 @@ const checks = {
   '입력 멈춘 뒤 복귀(rAF ≈ 15)': Math.abs(median(fb.raf_after_wheel) - 15) <= 2,
   '15FPS CSS DrawFrame ≈ 15': Math.abs(fb.css_draw_frames - 15) <= 2,
   '제한 없음 CSS DrawFrame ≈ 60': free.css_draw_frames >= 55,
+  '입력 시 해제 끈 사이트는 휠 입력 중에도 rAF ≈ 15': Math.max(...noBoost.raf_during_wheel) <= 17,
 };
 for (const [k, v] of Object.entries(checks)) console.log(`${v ? 'PASS' : 'FAIL'} ${k}`);
 server.close();

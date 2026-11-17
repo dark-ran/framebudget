@@ -1,0 +1,57 @@
+From 1368930899f303f16b99f6cb1676451402335db2 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:36:32 +0900
+Subject: [PATCH 1/2] =?UTF-8?q?fix:=20=EB=A0=8C=EB=8D=94=EB=9F=AC=EA=B0=80?=
+ =?UTF-8?q?=20=EC=A3=BD=EC=9D=80=20=EB=92=A4=20=EB=8B=A4=EC=8B=9C=20?=
+ =?UTF-8?q?=EB=B6=88=EB=9F=AC=EC=98=A4=EB=A9=B4=20FPS=20=EC=A0=9C=ED=95=9C?=
+ =?UTF-8?q?=EC=9D=B4=20=ED=92=80=EB=A6=AC=EB=8D=98=20=EB=AC=B8=EC=A0=9C=20?=
+ =?UTF-8?q?=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+렌더러가 죽으면 viz가 프레임 싱크를 무효화하면서 저장한 간격도 지운다.
+그런데 다시 불러올 때 프레임 싱크 ID가 같아서, 탭 헬퍼는 이미 적용했다고
+보고 다시 보내지 않았다. 15FPS 규칙 탭이 크래시 후 100FPS로 돌았다.
+PrimaryMainFrameRenderProcessGone에서 적용 기억을 지운다.
+---
+ chrome/browser/ui/framebudget/framebudget_tab_helper.cc | 9 +++++++++
+ chrome/browser/ui/framebudget/framebudget_tab_helper.h  | 2 ++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 518061ff8b..d60eb8e551 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -211,6 +211,15 @@ void FrameBudgetTabHelper::OnInputEvent(const content::RenderWidgetHost& widget,
+   }
+ }
+ 
++void FrameBudgetTabHelper::PrimaryMainFrameRenderProcessGone(
++    base::TerminationStatus status) {
++  // viz drops the budget together with the dead renderer's frame sink, but a
++  // reload reuses the same frame sink id. Forget what was sent so that the
++  // next Apply() sends it again.
++  applied_frame_sink_id_ = viz::FrameSinkId();
++  applied_interval_ = base::TimeDelta();
++}
++
+ void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
+     content::RenderWidgetHost* widget) {
+   input_observation_.Reset();
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 72f8e62b37..bff524a9dc 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -74,6 +74,8 @@ class FrameBudgetTabHelper
+   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
+                               content::RenderFrameHost* new_host) override;
+   void PrimaryPageChanged(content::Page& page) override;
++  void PrimaryMainFrameRenderProcessGone(
++      base::TerminationStatus status) override;
+   void WebContentsDestroyed() override;
+ 
+   // content::RenderWidgetHost::InputEventObserver:
+-- 
+2.53.0
+

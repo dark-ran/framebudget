@@ -134,9 +134,7 @@ node chromium/tests/headless_check.mjs out/Default/chrome --no-sandbox
 - **원인:** Chromium 156은 `kUseActionsForBrowserCommands`가 켜져 있으면 명령 등록부로 `CommandActionUpdater`를 씁니다. 이 등록부는 액션 표에 있는 명령만 인정합니다. 그래서 `SupportsCommand`가 false가 되어 FrameBudget 명령이 버려졌습니다.
 - **수정:** `BrowserView::AcceleratorPressed`에서 이 명령을 탭 헬퍼로 바로 넘깁니다.
 
-아직 확인하지 않은 것:
-
-- 전력 절감량 (FrameBudget 빌드로 다시 측정할 예정)
+전력 절감량은 [저장소 README](../README.md#framebudget-빌드-측정-결과)에 정리했습니다.
 
 ## 출처와 라이선스
 

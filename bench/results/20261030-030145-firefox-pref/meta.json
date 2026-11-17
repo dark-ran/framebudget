@@ -1,0 +1,29 @@
+{
+  "browser": "firefox",
+  "version": "Mozilla Firefox 159.0",
+  "method": "pref",
+  "args": {
+    "browser": "firefox",
+    "method": "pref",
+    "exe": "/snap/firefox/current/usr/lib/firefox/firefox",
+    "caps": "0,15",
+    "scenes": "webgl",
+    "reps": 3,
+    "warmup": 5,
+    "duration": 15,
+    "cooldown": 5,
+    "settle": 5,
+    "page_args": ""
+  },
+  "idle": {
+    "pkg_w": 17.317,
+    "cores_w": 0.12,
+    "gfx_w": null,
+    "cpu_pct": 0.956,
+    "gpu3d_pct": null,
+    "gpu3d_other_pct": null,
+    "samples": 10
+  },
+  "viewport": "1366x768",
+  "on_ac_all_runs": true
+}

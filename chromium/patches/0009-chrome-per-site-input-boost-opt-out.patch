@@ -1,0 +1,279 @@
+From d8ebaba8ae40f6e40c5199f28b811f27c876fbbb Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:08:50 +0900
+Subject: [PATCH] =?UTF-8?q?chrome:=20=EC=82=AC=EC=9D=B4=ED=8A=B8=EB=B3=84?=
+ =?UTF-8?q?=EB=A1=9C=20=EC=9E=85=EB=A0=A5=20=EC=8B=9C=20=EC=A0=9C=ED=95=9C?=
+ =?UTF-8?q?=20=ED=95=B4=EC=A0=9C=EB=A5=BC=20=EB=81=8C=20=EC=88=98=20?=
+ =?UTF-8?q?=EC=9E=88=EA=B2=8C=20=ED=95=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+게임처럼 계속 입력하는 사이트에서는 입력 때마다 제한이 1초씩 풀려서
+사실상 제한이 걸리지 않았다. framebudget.no_input_boost_sites 목록과
+--framebudget-no-input-boost 실행 옵션을 추가하고, 목록의 사이트(하위 도메인
+포함)에서는 입력이 있어도 제한을 유지한다. chrome://framebudget의 사이트
+규칙마다 '입력 시 해제' 체크 상자를 두고, 규칙을 지우면 목록에서도 지운다.
+---
+ .../ui/framebudget/framebudget_policy.cc      | 26 +++++++++
+ .../ui/framebudget/framebudget_policy.h       | 10 ++++
+ .../ui/framebudget/framebudget_tab_helper.cc  |  6 +-
+ .../browser/ui/framebudget/framebudget_ui.cc  | 55 +++++++++++++++++--
+ 4 files changed, 88 insertions(+), 9 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index 63a0c2dbc9..cda2118da5 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -22,6 +22,7 @@ namespace {
+ 
+ constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
+ constexpr char kSitesSwitch[] = "framebudget-sites";
++constexpr char kNoInputBoostSwitch[] = "framebudget-no-input-boost";
+ constexpr int kMaxFps = 240;
+ 
+ // Returns `value` as an FPS, or nullopt if it is not a number.
+@@ -62,6 +63,13 @@ CommandLineConfig::CommandLineConfig() {
+     }
+     sites.emplace_back(std::move(host), *fps);
+   }
++  for (std::string_view site : base::SplitStringPiece(
++           command_line.GetSwitchValueASCII(kNoInputBoostSwitch), ",",
++           base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    if (std::string host = NormalizeHost(site); !host.empty()) {
++      no_input_boost_sites.push_back(std::move(host));
++    }
++  }
+ }
+ 
+ CommandLineConfig::~CommandLineConfig() = default;
+@@ -70,6 +78,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterIntegerPref(kDefaultFpsPref, 0);
+   registry->RegisterDictionaryPref(kSitesPref);
+   registry->RegisterBooleanPref(kInputBoostPref, true);
++  registry->RegisterListPref(kNoInputBoostSitesPref);
+ }
+ 
+ const CommandLineConfig& GetCommandLineConfig() {
+@@ -112,6 +121,23 @@ Decision Decide(const PrefService& prefs,
+           ""};
+ }
+ 
++bool InputBoostAllowed(const PrefService& prefs, std::string_view host) {
++  if (!prefs.GetBoolean(kInputBoostPref)) {
++    return false;
++  }
++  for (const std::string& site : GetCommandLineConfig().no_input_boost_sites) {
++    if (HostMatches(host, site)) {
++      return false;
++    }
++  }
++  for (const base::Value& site : prefs.GetList(kNoInputBoostSitesPref)) {
++    if (site.is_string() && HostMatches(host, site.GetString())) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ std::string_view SourceId(Source source) {
+   switch (source) {
+     case Source::kTabOverride:
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 1de301dd3c..764c88e30a 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -27,12 +27,17 @@ inline constexpr char kDefaultFpsPref[] = "framebudget.default_fps";
+ inline constexpr char kSitesPref[] = "framebudget.sites";
+ // Whether user input briefly lifts the limit of a tab.
+ inline constexpr char kInputBoostPref[] = "framebudget.input_boost";
++// List of hosts where input never lifts the limit, e.g. games that take
++// continuous input. A host also covers its subdomains.
++inline constexpr char kNoInputBoostSitesPref[] =
++    "framebudget.no_input_boost_sites";
+ 
+ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+ 
+ // Command line rules, which take priority over the saved ones:
+ //   --framebudget-default-fps=15
+ //   --framebudget-sites=youtube.com=60,example.com=15
++//   --framebudget-no-input-boost=game.example,play.example
+ struct CommandLineConfig {
+   // Parses the current process's command line.
+   CommandLineConfig();
+@@ -43,6 +48,8 @@ struct CommandLineConfig {
+   std::optional<int> default_fps;
+   // (host, fps) in command line order. The first match wins.
+   std::vector<std::pair<std::string, int>> sites;
++  // Hosts where input never lifts the limit.
++  std::vector<std::string> no_input_boost_sites;
+ };
+ const CommandLineConfig& GetCommandLineConfig();
+ 
+@@ -68,6 +75,9 @@ Decision Decide(const PrefService& prefs,
+                 std::string_view host,
+                 std::optional<int> tab_override);
+ 
++// Whether user input may briefly lift the limit of a tab showing `host`.
++bool InputBoostAllowed(const PrefService& prefs, std::string_view host);
++
+ // Stable identifier of `source`, used by chrome://framebudget.
+ std::string_view SourceId(Source source);
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 66a76ac68f..518061ff8b 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -93,7 +93,7 @@ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+   pref_change_registrar_.Init(prefs());
+   for (const char* pref :
+        {framebudget::kDefaultFpsPref, framebudget::kSitesPref,
+-        framebudget::kInputBoostPref}) {
++        framebudget::kInputBoostPref, framebudget::kNoInputBoostSitesPref}) {
+     pref_change_registrar_.Add(
+         pref, base::BindRepeating(&FrameBudgetTabHelper::Apply,
+                                   base::Unretained(this)));
+@@ -195,7 +195,7 @@ void FrameBudgetTabHelper::OnInputEvent(const content::RenderWidgetHost& widget,
+                                         const blink::WebInputEvent& event,
+                                         InputEventSource source) {
+   if (!IsActiveInput(event) ||
+-      !prefs()->GetBoolean(framebudget::kInputBoostPref)) {
++      !framebudget::InputBoostAllowed(*prefs(), host())) {
+     return;
+   }
+   // Nothing to lift on an unlimited tab.
+@@ -222,7 +222,7 @@ void FrameBudgetTabHelper::Apply() {
+       web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
+   ObserveWidget(widget);
+ 
+-  if (boosted_ && !prefs()->GetBoolean(framebudget::kInputBoostPref)) {
++  if (boosted_ && !framebudget::InputBoostAllowed(*prefs(), host())) {
+     boost_timer_.Stop();
+     boosted_ = false;
+   }
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 03ddf33f2b..3c60e7b3c0 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -56,7 +56,7 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   <h2>사이트 규칙</h2>
+   <p class="note">하위 도메인에도 적용됩니다. 더 구체적인 도메인 규칙이 우선합니다.</p>
+   <table>
+-    <thead><tr><th>사이트</th><th>FPS</th><th></th></tr></thead>
++    <thead><tr><th>사이트</th><th>FPS</th><th>입력 시 해제</th><th></th></tr></thead>
+     <tbody id="sites"></tbody>
+   </table>
+   <form id="add-site">
+@@ -65,6 +65,7 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+     <button type="submit">추가</button>
+   </form>
+   <div id="cmdline-sites"></div>
++  <p class="note">게임처럼 계속 입력하는 사이트는 "입력 시 해제"를 끄면 입력 중에도 제한이 유지됩니다.</p>
+ </section>
+ 
+ <section>
+@@ -156,10 +157,19 @@ function render(state) {
+       `실행 옵션 --framebudget-default-fps=${state.commandLineDefaultFps} 이 우선 적용되고 있습니다.`;
+   $('boost').checked = state.inputBoost;
+ 
+-  $('sites').replaceChildren(...state.sites.map((site) => row(
+-      site.host,
+-      fpsSelect(site.fps, (fps) => chrome.send('setSiteRule', [site.host, fps])),
+-      button('삭제', () => chrome.send('removeSiteRule', [site.host])))));
++  $('sites').replaceChildren(...state.sites.map((site) => {
++    const boost = el('input');
++    boost.type = 'checkbox';
++    boost.checked = site.inputBoost;
++    boost.disabled = !state.inputBoost;
++    boost.title = state.inputBoost ? '' : '기본값에서 입력 시 해제가 꺼져 있습니다.';
++    boost.onchange = () => chrome.send('setSiteInputBoost', [site.host, boost.checked]);
++    return row(
++        site.host,
++        fpsSelect(site.fps, (fps) => chrome.send('setSiteRule', [site.host, fps])),
++        boost,
++        button('삭제', () => chrome.send('removeSiteRule', [site.host])));
++  }));
+   $('new-fps').replaceChildren(fpsSelect(newFps, (fps) => { newFps = fps; }));
+ 
+   const cmdline = $('cmdline-sites');
+@@ -167,8 +177,12 @@ function render(state) {
+   if (state.commandLineSites.length) {
+     cmdline.append(el('p', '실행 옵션 규칙 (저장된 규칙보다 우선, 여기서 바꿀 수 없음): ' +
+         state.commandLineSites.map((s) => `${s.host}=${fpsLabel(s.fps)}`).join(', ')));
+-    cmdline.firstChild.className = 'note';
+   }
++  if (state.commandLineNoInputBoost.length) {
++    cmdline.append(el('p', '실행 옵션으로 입력 시 해제를 끈 사이트: ' +
++        state.commandLineNoInputBoost.join(', ')));
++  }
++  for (const note of cmdline.children) note.className = 'note';
+ 
+   $('tabs').replaceChildren(...state.tabs.map((tab) => {
+     const title = el('div', tab.title || '(제목 없음)');
+@@ -261,6 +275,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     Register("setInputBoost", &FrameBudgetHandler::HandleSetInputBoost);
+     Register("setSiteRule", &FrameBudgetHandler::HandleSetSiteRule);
+     Register("removeSiteRule", &FrameBudgetHandler::HandleRemoveSiteRule);
++    Register("setSiteInputBoost",
++             &FrameBudgetHandler::HandleSetSiteInputBoost);
+     Register("setTabOverride", &FrameBudgetHandler::HandleSetTabOverride);
+     Register("saveTabAsSiteRule", &FrameBudgetHandler::HandleSaveTabAsSiteRule);
+   }
+@@ -325,6 +341,24 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     if (args.size() == 1 && args[0].is_string()) {
+       ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)
+           ->Remove(args[0].GetString());
++      ScopedListPrefUpdate(prefs(), framebudget::kNoInputBoostSitesPref)
++          ->EraseValue(base::Value(args[0].GetString()));
++    }
++    SendState();
++  }
++
++  // Args: host, whether input may lift the limit on that host.
++  void HandleSetSiteInputBoost(const base::ListValue& args) {
++    if (args.size() == 2 && args[0].is_string() && args[1].is_bool()) {
++      const std::string host = framebudget::NormalizeHost(args[0].GetString());
++      if (!host.empty()) {
++        ScopedListPrefUpdate update(prefs(),
++                                    framebudget::kNoInputBoostSitesPref);
++        update->EraseValue(base::Value(host));
++        if (!args[1].GetBool()) {
++          update->Append(host);
++        }
++      }
+     }
+     SendState();
+   }
+@@ -367,6 +401,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     state.Set("inputBoost",
+               prefs()->GetBoolean(framebudget::kInputBoostPref));
+ 
++    const base::ListValue& no_boost =
++        prefs()->GetList(framebudget::kNoInputBoostSitesPref);
+     base::ListValue sites;
+     for (const auto [host, value] :
+          prefs()->GetDict(framebudget::kSitesPref)) {
+@@ -374,6 +410,7 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+         base::DictValue site;
+         site.Set("host", host);
+         site.Set("fps", *fps);
++        site.Set("inputBoost", !no_boost.contains(host));
+         sites.Append(std::move(site));
+       }
+     }
+@@ -388,6 +425,12 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     }
+     state.Set("commandLineSites", std::move(command_line_sites));
+ 
++    base::ListValue command_line_no_boost;
++    for (const std::string& host : command_line.no_input_boost_sites) {
++      command_line_no_boost.Append(host);
++    }
++    state.Set("commandLineNoInputBoost", std::move(command_line_no_boost));
++
+     base::ListValue tabs;
+     for (FrameBudgetTabHelper* helper : FrameBudgetTabHelper::GetAll()) {
+       content::WebContents* contents = helper->web_contents();
+-- 
+2.53.0
+

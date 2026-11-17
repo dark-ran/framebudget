@@ -4,7 +4,7 @@
 
 *An open-source Chromium-based browser that cuts rendering power with per-site, per-tab frame-rate budgets.*
 
-> 현재 단계: 기획과 사전 실험. 측정 도구, 실험 결과, Chromium 패치를 단계별로 이 저장소에 올리고 있습니다. 진행 상황은 [로드맵](#로드맵)에서 확인할 수 있습니다.
+> 현재 단계: Chromium 패치를 빌드해 동작과 전력 절감을 확인했고, Linux용 실행 파일을 [Release](https://github.com/dark-ran/framebudget/releases/tag/v0.1.0)로 배포합니다. 진행 상황은 [로드맵](#로드맵)에서 확인할 수 있습니다.
 
 ## 문제
 
@@ -19,6 +19,23 @@ FrameBudget은 **웹 콘텐츠가 프레임을 만드는 빈도 자체를 사이
 - **모니터와 브라우저 UI는 그대로 둡니다:** 모니터 주사율을 바꾸지 않으며, 탭 전환·주소창 같은 브라우저 화면은 계속 부드럽게 동작합니다.
 - **입력 중에는 잠시 해제합니다:** 스크롤, 타이핑, 클릭 중에는 제한을 풀고, 입력이 멈추면 다시 적용하여 사용성을 유지합니다.
 - **서버에 따로 알리지 않습니다:** 제한 설정을 웹사이트에 전송하지 않으며, 페이지는 화면 갱신이 느린 환경에서 실행되는 것처럼 동작합니다. 단, 페이지가 프레임 간격을 직접 측정하여 이를 알아채는 것까지 막을 수는 없습니다.
+
+## 내려받기와 실행
+
+[Release v0.1.0](https://github.com/dark-ran/framebudget/releases/tag/v0.1.0)에서 Linux x86-64용 묶음(164MB)을 받습니다. Ubuntu에서 빌드하고 시험했으며, Windows와 macOS에서는 실행되지 않습니다.
+
+```bash
+sha256sum -c FrameBudget-156.0.8078.48-linux-x64.tar.xz.sha256
+tar -xJf FrameBudget-156.0.8078.48-linux-x64.tar.xz
+./FrameBudget-156.0.8078.48-linux-x64/framebudget
+```
+
+- 주소창에 `chrome://framebudget`을 입력하면 기본값, 사이트 규칙, 열린 탭의 상태를 보고 바꿀 수 있습니다.
+- Alt+Shift+F로 현재 탭의 FPS를 60 → 30 → 15 → 5 → 제한 없음 → 규칙 따름 순으로 바꿉니다.
+- Ubuntu 23.10 이후는 AppArmor 때문에 Chromium 샌드박스가 동작하지 않습니다. 이 경우 실행 스크립트가 `--no-sandbox`를 붙이고 경고를 표시합니다. 시험용으로만 쓰는 것을 권합니다.
+- 직접 빌드하려면 [Chromium 빌드 문서](chromium/README.md)를 봅니다.
+
+![Alt+Shift+F를 누른 뒤 창 왼쪽 아래의 상태 표시](docs/images/status-indicator.png)
 
 ## 기존 기술과의 차이
 
@@ -114,6 +131,7 @@ viz FrameSinkManager (GPU 프로세스)
 - [x] 빌드한 FrameBudget으로 전력 재측정 (Firefox 결과와 비교)
 - [ ] 사이트별 "입력 시 해제" 끄기 (게임처럼 계속 입력하는 사이트용)
 - [x] 외장 GPU(100Hz 모니터) 환경 측정
+- [x] Linux 배포용 빌드와 Release v0.1.0
 - [ ] 120·144Hz 모니터 측정
 - [ ] 저화질 강제 (Canvas·WebGL 내부 해상도, 이미지 품질) 실험
 

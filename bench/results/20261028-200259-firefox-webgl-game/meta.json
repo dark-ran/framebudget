@@ -1,0 +1,22 @@
+{
+  "url": "외부 3D WebGL 게임 페이지 (주소 비공개)",
+  "version": "159.0",
+  "args": {
+    "url": "외부 3D WebGL 게임 페이지 (주소 비공개)",
+    "reps": 3,
+    "warmup": 20,
+    "duration": 40,
+    "cooldown": 10,
+    "label": "webgl-game"
+  },
+  "idle": {
+    "pkg_w": 6.376,
+    "cores_w": 1.276,
+    "gfx_w": 0.019,
+    "cpu_pct": 7.042,
+    "gpu3d_pct": 0.0,
+    "gpu3d_other_pct": 8.346,
+    "samples": 10
+  },
+  "on_ac_all_runs": true
+}

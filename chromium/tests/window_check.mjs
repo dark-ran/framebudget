@@ -1,0 +1,240 @@
+// FrameBudget 빌드를 일반 창으로 띄워, 실제 키 입력(xdotool)과 CDP로 여러 상황을 확인합니다.
+// 사용법 (가상 화면 예):
+//   Xvfb :99 -screen 0 1400x800x24 & DISPLAY=:99 node window_check.mjs <chrome> [--no-sandbox]
+// 필요: Node 22 이상, X 화면(DISPLAY), xdotool
+// FB_NO_KEYS=1이면 클릭·키 입력이 필요한 시험을 건너뜁니다. 실제 화면에서는 창 위치를
+// 데스크톱 환경이 정하므로, 좌표로 클릭하지 않도록 이 옵션을 씁니다.
+import {spawn, execFileSync} from 'node:child_process';
+import {createServer} from 'node:http';
+import {readFileSync, mkdtempSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join, dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+
+const [chrome, ...extra] = process.argv.slice(2);
+if (!chrome || !process.env.DISPLAY) {
+  console.error('사용법: DISPLAY=:99 node window_check.mjs <chrome> [--no-sandbox]');
+  process.exit(2);
+}
+const here = dirname(fileURLToPath(import.meta.url));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const keys = !process.env.FB_NO_KEYS;
+
+// 127.0.0.1과 localhost를 서로 다른 사이트로 쓰기 위해 IPv4·IPv6 모두에서 받습니다.
+const server = createServer((req, res) => {
+  const name = req.url.slice(1).split('?')[0];
+  if (!['raf.html', 'css.html', 'frame.html'].includes(name)) { res.writeHead(404).end(); return; }
+  res.writeHead(200, {'content-type': 'text/html'}).end(readFileSync(join(here, name)));
+}).listen(0, '::');
+await new Promise(r => server.once('listening', r));
+const port = server.address().port;
+const A = `http://127.0.0.1:${port}`, B = `http://localhost:${port}`;
+
+const WIDTH = 680;  // 창 두 개를 겹치지 않게 나란히 둡니다.
+
+async function launch(flags) {
+  const profile = mkdtempSync(join(tmpdir(), 'fb-window-'));
+  const proc = spawn(chrome, ['--ozone-platform=x11', '--no-first-run', '--no-default-browser-check',
+    `--user-data-dir=${profile}`, '--remote-debugging-port=0', `--window-size=${WIDTH},760`,
+    '--window-position=0,0', ...extra, ...flags, 'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
+  const devtools = await new Promise((resolve, reject) => {
+    let buf = '';
+    proc.stderr.on('data', d => { buf += d; const m = buf.match(/DevTools listening on (ws:\/\/\S+)/); if (m) resolve(m[1]); });
+    proc.on('exit', c => reject(new Error(`chrome 종료(${c}): ${buf.slice(-500)}`)));
+  });
+  const ws = new WebSocket(devtools);
+  await new Promise(r => ws.onopen = r);
+  let id = 0; const pend = new Map(), handlers = [];
+  ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id) pend.get(m.id)?.(m); else handlers.forEach(h => h(m)); };
+  // 응답이 없으면 멈추지 않고 실패로 넘어갑니다.
+  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const myId = ++id;
+    const timer = setTimeout(() => { pend.delete(myId); reject(new Error(`${method}: 15초 동안 응답 없음`)); }, 15000);
+    pend.set(myId, m => { clearTimeout(timer); m.error ? reject(new Error(`${method}: ${m.error.message}`)) : resolve(m.result); });
+    ws.send(JSON.stringify({id: myId, method, params, ...(sessionId && {sessionId})}));
+  });
+  const exited = new Promise(r => proc.once('exit', r));
+  return {
+    send, on: h => handlers.push(h),
+    close: async () => {
+      ws.close(); proc.kill(); await exited;
+      // 하위 프로세스가 늦게 끝나 지우지 못해도 시험 결과에는 영향이 없습니다.
+      try { rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 500}); }
+      catch (e) { console.warn(`임시 프로필을 지우지 못함: ${profile}`); }
+    },
+  };
+}
+
+// 페이지 하나를 다루는 도우미. slot은 창 위치(0 왼쪽, 1 오른쪽)입니다.
+async function attach(b, targetId, slot) {
+  const {sessionId} = await b.send('Target.attachToTarget', {targetId, flatten: true});
+  const s = (method, params) => b.send(method, params, sessionId);
+  await s('Page.enable');
+  const {windowId} = await b.send('Browser.getWindowForTarget', {targetId});
+  await b.send('Browser.setWindowBounds', {windowId, bounds: {left: slot * (WIDTH + 20), top: 0, width: WIDTH, height: 760}});
+  const page = {
+    targetId, slot,
+    eval: async (expr, userGesture = false) =>
+      (await s('Runtime.evaluate', {expression: expr, returnByValue: true, userGesture})).result.value,
+    goto: async url => { await s('Page.navigate', {url}); await sleep(2000); },
+    reload: async () => { await s('Page.reload'); await sleep(2000); },
+    // Page.crash는 렌더러가 죽어서 응답이 오지 않으므로 기다리지 않습니다.
+    crash: () => { s('Page.crash').catch(() => {}); },
+    // 창 가운데를 눌러 키 입력을 받게 합니다. 클릭도 입력이라 잠시 기다립니다.
+    focus: async () => { xdo('mousemove', String(slot * (WIDTH + 20) + WIDTH / 2), '450', 'click', '1'); await sleep(1500); },
+    // sec초 동안 초당 rAF 수. key를 주면 그동안 그 키를 계속 누릅니다.
+    raf: async (sec = 2, {key, counts = 'counts'} = {}) => {
+      await page.eval(`window.${counts}=[]`);
+      if (key) xdo('key', '--delay', '50', '--repeat', String(sec * 20), key);
+      else await sleep(sec * 1000 + 150);
+      if (key) await sleep(300);
+      return page.eval(`window.${counts}`);
+    },
+  };
+  return page;
+}
+
+async function newWindow(b, url, slot) {
+  const {targetId} = await b.send('Target.createTarget', {url, newWindow: true});
+  await sleep(1500);
+  return attach(b, targetId, slot);
+}
+
+function xdo(...args) { execFileSync('xdotool', args, {stdio: 'ignore'}); }
+const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+// FPS 상한 판정: 상한을 넘지 않고(측정 오차 1 허용), 화면 주기 때문에 낮아지더라도 상한의 75% 이상.
+// 예: 100Hz 화면에서 30FPS 상한은 10ms 단위로 맞춰져 25FPS가 됩니다.
+const near = (a, fps) => a.length > 0 && Math.max(...a) <= fps + 1 && median(a) >= fps * 0.75;
+
+const results = [];
+function check(name, ok, data) {
+  results.push(ok);
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}  ${JSON.stringify(data)}`);
+}
+
+// ---- 1회차: 실행 옵션 규칙 ----
+{
+  const b = await launch(['--framebudget-sites=127.0.0.1=15,localhost=30', '--framebudget-no-input-boost=localhost']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    const pb = await newWindow(b, `${B}/raf.html`, 1);
+    await sleep(1500);
+
+    // 1. 두 창을 동시에 잽니다.
+    const [ra, rb] = await Promise.all([pa.raf(3), pb.raf(3)]);
+    check('1. 탭별 동시 제한: 127.0.0.1=15', near(ra, 15), ra);
+    check('1. 탭별 동시 제한: localhost=30', near(rb, 30), rb);
+
+    // 2. 실제 키 입력
+    if (keys) {
+    await pa.focus();
+    const ka = await pa.raf(2, {key: 'a'});
+    check('2. 키 입력 중 해제(127.0.0.1): 최대 ≥ 55', Math.max(...ka) >= 55, ka);
+    await pb.focus();
+    const kb = await pb.raf(2, {key: 'a'});
+    check('2. 입력 시 해제 끈 사이트(localhost)는 키 입력 중에도 30', near(kb, 30) && Math.max(...kb) <= 31, kb);
+    }
+
+    // 3. 다른 사이트로 이동했다가 돌아오기
+    await pa.goto(`${B}/raf.html`);
+    const nav1 = await pa.raf(2);
+    check('3. 127.0.0.1 → localhost 이동 후 30', near(nav1, 30), nav1);
+    await pa.goto(`${A}/raf.html`);
+    const nav2 = await pa.raf(2);
+    check('3. 다시 127.0.0.1로 돌아와 15', near(nav2, 15), nav2);
+
+    // 4. 다른 출처 iframe은 탭 규칙을 따릅니다.
+    await pa.goto(`${A}/frame.html?src=${encodeURIComponent(`${B}/raf.html`)}`);
+    const fr1 = await pa.raf(3, {counts: 'childCounts'});
+    check('4. 127.0.0.1(15) 탭 안의 localhost iframe도 15', near(fr1, 15), fr1);
+    await pa.goto(`${B}/frame.html?src=${encodeURIComponent(`${A}/raf.html`)}`);
+    const fr2 = await pa.raf(3, {counts: 'childCounts'});
+    check('4. localhost(30) 탭 안의 127.0.0.1 iframe은 30', near(fr2, 30), fr2);
+
+    // 6. 새로고침
+    await pa.goto(`${A}/raf.html`);
+    await pa.reload();
+    const rl = await pa.raf(2);
+    check('6. 새로고침 뒤에도 15', near(rl, 15), rl);
+
+    // 7. 렌더러가 죽은 뒤 다시 불러오기
+    await pa.crash();
+    await sleep(1000);
+    await pa.goto(`${A}/raf.html`);
+    const cr = await pa.raf(2);
+    check('7. 렌더러 크래시 후 다시 불러와도 15', near(cr, 15), cr);
+
+    // 5. Alt+Shift+F 탭 고정 뒤 다른 사이트로 이동
+    if (keys) {
+    await pa.focus();
+    xdo('key', 'alt+shift+f');
+    await sleep(2000);
+    const ov = await pa.raf(2);
+    check('5. Alt+Shift+F 한 번 → 60 고정', near(ov, 60), ov);
+    await pa.goto(`${B}/raf.html`);
+    const ovNav = await pa.raf(2);
+    check('5. 고정한 탭은 다른 사이트로 가도 60', near(ovNav, 60), ovNav);
+    }
+
+    // 6. window.open 팝업은 자기 사이트 규칙을 따릅니다.
+    await pb.goto(`${A}/raf.html`);
+    const before = new Set((await b.send('Target.getTargets')).targetInfos.map(t => t.targetId));
+    // 사용자 동작 없이 연 팝업은 차단되므로 userGesture로 엽니다.
+    await pb.eval(`void window.open(location.href, '_blank', 'popup,left=0,top=0,width=${WIDTH},height=400')`, true);
+    await sleep(2500);
+    const popup = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page' && !before.has(t.targetId));
+    if (popup) {
+      await pa.goto('about:blank');  // 팝업과 겹치는 왼쪽 창은 비워 둡니다.
+      const pp = await attach(b, popup.targetId, 0);
+      const rp = await pp.raf(2);
+      check('6. window.open 팝업(127.0.0.1)도 15', near(rp, 15), rp);
+    } else {
+      check('6. window.open 팝업(127.0.0.1)도 15', false, '팝업을 찾지 못함');
+    }
+  } finally {
+    await b.close();
+  }
+}
+
+// ---- 2회차: 설정 화면으로 바꾸는 규칙 ----
+{
+  const b = await launch([]);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    const ui = await newWindow(b, 'chrome://framebudget', 1);
+    const sendUi = async (msg, args) => { await ui.eval(`chrome.send(${JSON.stringify(msg)}, ${JSON.stringify(args)})`); await sleep(1500); };
+
+    const r0 = await pa.raf(2);
+    check('8. 규칙 없음: 제한 없음(≥ 55)', median(r0) >= 55, r0);
+    await sendUi('setSiteRule', ['127.0.0.1', 15]);
+    const r1 = await pa.raf(2);
+    check('8. 설정 화면에서 127.0.0.1=15 추가 → 열린 탭에 바로 15', near(r1, 15), r1);
+    await sendUi('setDefaultFps', [30]);
+    await pa.goto(`${B}/raf.html`);
+    const r2 = await pa.raf(2);
+    check('8. 기본값 30 → 규칙 없는 localhost는 30', near(r2, 30), r2);
+    await pa.goto(`${A}/raf.html`);
+    await sendUi('removeSiteRule', ['127.0.0.1']);
+    const r3 = await pa.raf(2);
+    check('8. 127.0.0.1 규칙 삭제 → 열린 탭이 기본값 30으로', near(r3, 30), r3);
+    if (keys) {
+      await sendUi('setInputBoost', [false]);
+      await pa.focus();
+      const r4 = await pa.raf(2, {key: 'a'});
+      check('8. 전체 입력 시 해제를 끄면 키 입력 중에도 30', near(r4, 30) && Math.max(...r4) <= 31, r4);
+    }
+    const state = await ui.eval(`(() => [...document.querySelectorAll('#tabs tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ')))()`);
+    check('8. 설정 화면의 열린 탭 표에 raf 탭이 30 FPS 기본값으로 표시', state.some(t => t.includes('raf') && t.includes('30 FPS') && t.includes('기본값')), state);
+  } finally {
+    await b.close();
+  }
+}
+
+server.close();
+const failed = results.filter(ok => !ok).length;
+console.log(`\n${results.length - failed}/${results.length} 통과`);
+process.exit(failed ? 1 : 0);

@@ -33,7 +33,12 @@ async function launch(flags) {
   });
   const exited = new Promise(r => proc.once('exit', r));
   // 브라우저가 프로필을 다 쓰고 끝난 뒤에 지웁니다.
-  return {port, close: async () => { proc.kill(); await exited; rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 300}); }};
+  return {port, close: async () => {
+    proc.kill(); await exited;
+    // 하위 프로세스가 늦게 끝나 지우지 못해도 시험 결과에는 영향이 없습니다.
+    try { rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 500}); }
+    catch { console.warn(`임시 프로필을 지우지 못함: ${profile}`); }
+  }};
 }
 
 async function open(port, url) {

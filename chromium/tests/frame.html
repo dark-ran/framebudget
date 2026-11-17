@@ -1,0 +1,8 @@
+<!doctype html><title>frame</title>
+<!-- ?src=URL 의 페이지를 iframe으로 띄우고, iframe이 보내는 초당 rAF 수를 childCounts에 모읍니다. -->
+<iframe id=f width=400 height=200></iframe>
+<script>
+window.childCounts=[];
+addEventListener('message',e=>{if(e.data&&'fbCount' in e.data)childCounts.push(e.data.fbCount)});
+document.getElementById('f').src=new URLSearchParams(location.search).get('src');
+</script>

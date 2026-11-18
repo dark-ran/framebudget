@@ -1,0 +1,87 @@
+From 81a21af5c7beba22215f6e5ec6f0888140672c6b Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:36:33 +0900
+Subject: [PATCH 2/2] =?UTF-8?q?fix:=20FrameBudget=20=EA=B0=84=EA=B2=A9?=
+ =?UTF-8?q?=EC=9D=84=20=EB=B0=98=EC=98=AC=EB=A6=BC=ED=95=98=EC=A7=80=20?=
+ =?UTF-8?q?=EC=95=8A=EA=B3=A0=20=EC=83=81=ED=95=9C=EC=9C=BC=EB=A1=9C=20?=
+ =?UTF-8?q?=EC=A7=80=ED=82=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+viz는 제한 간격을 가장 가까운 vsync로 반올림한다(반 주기 여유). 그래서
+100Hz 화면에서 30FPS 상한이 30ms 간격, 즉 33FPS가 되어 상한을 넘었다.
+FrameBudget이 간격을 정하는 프레임 싱크에서는 간격이 다 지난 뒤에만
+그리고, 타이밍 흔들림만 1/10 vsync 허용한다. 다른 제한(에너지 세이버 등)의
+동작은 그대로 둔다. 100Hz에서 30FPS 상한은 25FPS가 된다.
+---
+ .../service/frame_sinks/compositor_frame_sink_support.cc   | 5 +++++
+ .../service/frame_sinks/compositor_frame_sink_support.h    | 7 +++++++
+ .../viz/service/frame_sinks/frame_sink_manager_impl.cc     | 3 +++
+ 3 files changed, 15 insertions(+)
+
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+index 798d04318b..8ee28ff6fa 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+@@ -1633,6 +1633,11 @@ bool CompositorFrameSinkSupport::ShouldThrottleBeginFrameAsRequested(
+   // need to know if the current frame has elapsed a full cadence interval to
+   // know its time to render.
+   base::TimeDelta time_since_last_frame = frame_time - last_frame_time_;
++  if (throttle_interval_is_cap_) {
++    // Allow a tenth of a vsync for timing jitter.
++    return time_since_last_frame <
++           begin_frame_interval() - vsync_interval * 0.1;
++  }
+   return !HasElapsedCadenceInterval(vsync_interval, begin_frame_interval(),
+                                     time_since_last_frame);
+ }
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.h b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+index 78659653c9..9de68fad96 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.h
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+@@ -173,6 +173,12 @@ class VIZ_SERVICE_EXPORT CompositorFrameSinkSupport
+   // regardless of any other throttling.
+   void SetAllowThrottling(bool allowed);
+ 
++  // FrameBudget: if true, the throttle interval is an upper bound on the frame
++  // rate. Frames wait for the whole interval instead of being rounded to the
++  // nearest vsync, which could exceed the requested rate (e.g. 30 FPS on a
++  // 100 Hz display would otherwise give 33 FPS).
++  void SetThrottleIntervalIsCap(bool is_cap) { throttle_interval_is_cap_ = is_cap; }
++
+   // If other clients are interactive, reduce frame cadence if `throttled`.
+ 
+   // SurfaceClient implementation.
+@@ -532,6 +538,7 @@ class VIZ_SERVICE_EXPORT CompositorFrameSinkSupport
+   LocalSurfaceId last_evicted_local_surface_id_;
+ 
+   base::TimeTicks last_frame_time_;
++  bool throttle_interval_is_cap_ = false;
+ 
+   // Initialize |last_drawn_frame_index_| as though the frame before the first
+   // has been drawn.
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index 36cf6a8612..3dda7e2341 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -1361,6 +1361,8 @@ void FrameSinkManagerImpl::ApplyThrottlingRules(
+                                           ? throttle_interval_
+                                           : global_throttle;
+       support->SetThrottleInterval(std::max(budget, current));
++      // The budget is a cap only when it, not another throttle, sets the rate.
++      support->SetThrottleIntervalIsCap(budget > current);
+     }
+   }
+ 
+@@ -1383,6 +1385,7 @@ void FrameSinkManagerImpl::UpdateThrottling() {
+   for (auto& [id, support] : support_map_) {
+     support->SetThrottleInterval(gloabl_throttle);
+     support->SetAllowThrottling(true);
++    support->SetThrottleIntervalIsCap(false);
+   }
+ 
+   ApplyThrottlingRules(frame_sink_ids_to_throttle_, frame_budget_intervals_,
+-- 
+2.53.0
+

@@ -2,5 +2,6 @@
 <script>
 let n=0;window.counts=[];
 function f(){n++;document.getElementById('b').style.transform='translateX('+(n%200)+'px)';requestAnimationFrame(f)}
-requestAnimationFrame(f);setInterval(()=>{window.counts.push(n);n=0},1000);
+requestAnimationFrame(f);
+setInterval(()=>{window.counts.push(n);if(parent!==window)parent.postMessage({fbCount:n},'*');n=0},1000);
 </script>

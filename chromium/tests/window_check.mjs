@@ -19,6 +19,9 @@ if (!chrome || !process.env.DISPLAY) {
 const here = dirname(fileURLToPath(import.meta.url));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const keys = !process.env.FB_NO_KEYS;
+// FB_LOG=1이면 FrameBudget 로그를 시험 시작부터의 시각과 함께 출력합니다.
+const t0 = Date.now();
+const ts = () => ((Date.now() - t0) / 1000).toFixed(1);
 
 // 127.0.0.1과 localhost를 서로 다른 사이트로 쓰기 위해 IPv4·IPv6 모두에서 받습니다.
 const server = createServer((req, res) => {
@@ -36,7 +39,13 @@ async function launch(flags) {
   const profile = mkdtempSync(join(tmpdir(), 'fb-window-'));
   const proc = spawn(chrome, ['--ozone-platform=x11', '--no-first-run', '--no-default-browser-check',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0', `--window-size=${WIDTH},760`,
-    '--window-position=0,0', ...extra, ...flags, 'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
+    '--window-position=0,0', ...extra, ...flags,
+    ...(process.env.FB_LOG ? ['--enable-logging=stderr', '--vmodule=framebudget_tab_helper=1'] : []),
+    'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
+  if (process.env.FB_LOG) {
+    proc.stderr.on('data', d => d.toString().split('\n').filter(l => l.includes('FrameBudget:'))
+        .forEach(l => console.log(`${ts()} LOG ${l.replace(/^.*\] /, '')}`)));
+  }
   const devtools = await new Promise((resolve, reject) => {
     let buf = '';
     proc.stderr.on('data', d => { buf += d; const m = buf.match(/DevTools listening on (ws:\/\/\S+)/); if (m) resolve(m[1]); });
@@ -109,7 +118,7 @@ const near = (a, fps) => a.length > 0 && Math.max(...a) <= fps + 1 && median(a) 
 const results = [];
 function check(name, ok, data) {
   results.push(ok);
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}  ${JSON.stringify(data)}`);
+  console.log(`${process.env.FB_LOG ? ts() + ' ' : ''}${ok ? 'PASS' : 'FAIL'} ${name}  ${JSON.stringify(data)}`);
 }
 
 // ---- 1회차: 실행 옵션 규칙 ----

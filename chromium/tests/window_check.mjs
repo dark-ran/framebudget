@@ -114,7 +114,9 @@ function check(name, ok, data) {
 
 // ---- 1회차: 실행 옵션 규칙 ----
 {
-  const b = await launch(['--framebudget-sites=127.0.0.1=15,localhost=30', '--framebudget-no-input-boost=localhost']);
+  // 키 입력 시험을 건너뛸 때는(실제 화면) 바깥 입력이 결과를 흔들지 않게 두 사이트 모두 입력 시 해제를 끕니다.
+  const b = await launch(['--framebudget-sites=127.0.0.1=15,localhost=30',
+                          `--framebudget-no-input-boost=${keys ? 'localhost' : 'localhost,127.0.0.1'}`]);
   try {
     const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
     const pa = await attach(b, first.targetId, 0);

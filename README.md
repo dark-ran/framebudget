@@ -4,7 +4,7 @@
 
 *An open-source Chromium-based browser that cuts rendering power with per-site, per-tab frame-rate budgets.*
 
-> 현재 단계: Chromium 패치를 빌드해 동작과 전력 절감을 확인했고, Linux용 실행 파일을 [Release](https://github.com/dark-ran/framebudget/releases/tag/v0.1.0)로 배포합니다. 진행 상황은 [로드맵](#로드맵)에서 확인할 수 있습니다.
+> 현재 단계: Chromium 패치를 빌드해 동작과 전력 절감을 확인했고, Linux용 실행 파일을 [Release](https://github.com/dark-ran/framebudget/releases/tag/v0.2.0)로 배포합니다. 진행 상황은 [로드맵](#로드맵)에서 확인할 수 있습니다.
 
 ## 문제
 
@@ -22,12 +22,12 @@ FrameBudget은 **웹 콘텐츠가 프레임을 만드는 빈도 자체를 사이
 
 ## 내려받기와 실행
 
-[Release v0.1.0](https://github.com/dark-ran/framebudget/releases/tag/v0.1.0)에서 Linux x86-64용 묶음(164MB)을 받습니다. Ubuntu에서 빌드하고 시험했으며, Windows와 macOS에서는 실행되지 않습니다.
+[Release v0.2.0](https://github.com/dark-ran/framebudget/releases/tag/v0.2.0)에서 Linux x86-64용 묶음(164MB)을 받습니다. Ubuntu에서 빌드하고 시험했으며, Windows와 macOS에서는 실행되지 않습니다.
 
 ```bash
-sha256sum -c FrameBudget-156.0.8078.48-linux-x64.tar.xz.sha256
-tar -xJf FrameBudget-156.0.8078.48-linux-x64.tar.xz
-./FrameBudget-156.0.8078.48-linux-x64/framebudget
+sha256sum -c FrameBudget-0.2.0-linux-x64.tar.xz.sha256
+tar -xJf FrameBudget-0.2.0-linux-x64.tar.xz
+./FrameBudget-0.2.0-linux-x64/framebudget
 ```
 
 - 주소창에 `chrome://framebudget`을 입력하면 기본값, 사이트 규칙, 열린 탭의 상태를 보고 바꿀 수 있습니다.
@@ -132,7 +132,7 @@ viz FrameSinkManager (GPU 프로세스)
 - [x] 빌드한 FrameBudget으로 전력 재측정 (Firefox 결과와 비교)
 - [x] 사이트별 "입력 시 해제" 끄기 (게임처럼 계속 입력하는 사이트용)
 - [x] 외장 GPU(100Hz 모니터) 환경 측정
-- [x] Linux 배포용 빌드와 Release v0.1.0
+- [x] Linux 배포용 빌드와 Release (v0.1.0, v0.2.0)
 - [ ] 120·144Hz 모니터 측정
 - [ ] 저화질 강제 (Canvas·WebGL 내부 해상도, 이미지 품질) 실험
 

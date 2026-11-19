@@ -35,7 +35,9 @@ tar -xJf FrameBudget-0.2.0-linux-x64.tar.xz
 - Ubuntu 23.10 이후는 AppArmor 때문에 Chromium 샌드박스가 동작하지 않습니다. 이 경우 실행 스크립트가 `--no-sandbox`를 붙이고 경고를 표시합니다. 시험용으로만 쓰는 것을 권합니다.
 - 직접 빌드하려면 [Chromium 빌드 문서](chromium/README.md)를 봅니다.
 
-![Alt+Shift+F를 누른 뒤 창 왼쪽 아래의 상태 표시](docs/images/status-indicator.png)
+![Alt+Shift+F로 15 → 60 → 30 → 15 FPS로 바꾸는 데모](docs/images/demo.gif)
+
+127.0.0.1에 15FPS 규칙을 건 상태에서 Alt+Shift+F를 세 번 누른 화면입니다. 페이지의 숫자는 그 페이지가 1초 동안 그린 프레임 수이고, 바뀔 때마다 창 왼쪽 아래에 상태가 표시됩니다. 단축키를 누르는 것도 입력이라 1초 동안 제한이 풀리고, 숫자는 1초마다 갱신되므로 1~2초 뒤에 새 값이 보입니다.
 
 ## 기존 기술과의 차이
 

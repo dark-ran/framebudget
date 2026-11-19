@@ -93,7 +93,8 @@ async function attach(b, targetId, slot) {
     focus: async () => { xdo('mousemove', String(slot * (WIDTH + 20) + WIDTH / 2), '450', 'click', '1'); await sleep(1500); },
     // sec초 동안 초당 rAF 수. key를 주면 그동안 그 키를 계속 누릅니다.
     raf: async (sec = 2, {key, counts = 'counts'} = {}) => {
-      await page.eval(`window.${counts}=[]`);
+      // 페이지의 카운터(n)도 0으로 맞춰, 첫 구간에 측정 전 프레임이 섞이지 않게 합니다.
+      await page.eval(`window.${counts}=[];${counts === 'counts' ? 'n=0;' : ''}`);
       if (key) xdo('key', '--delay', '50', '--repeat', String(sec * 20), key);
       else await sleep(sec * 1000 + 150);
       if (key) await sleep(300);
@@ -187,6 +188,11 @@ function check(name, ok, data) {
     await pa.goto(`${B}/raf.html`);
     const ovNav = await pa.raf(2);
     check('5. 고정한 탭은 다른 사이트로 가도 60', near(ovNav, 60), ovNav);
+    // 단축키를 누르는 것은 입력 시 해제를 일으키지 않아야 합니다.
+    xdo('key', 'alt+shift+f');
+    await sleep(300);
+    const ovKey = await pa.raf(2);
+    check('5. 단축키 직후에도 제한이 풀리지 않음 (60 → 30)', near(ovKey, 30), ovKey);
     }
 
     // 6. window.open 팝업은 자기 사이트 규칙을 따릅니다.
@@ -240,6 +246,45 @@ function check(name, ok, data) {
     }
     const state = await ui.eval(`(() => [...document.querySelectorAll('#tabs tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ')))()`);
     check('8. 설정 화면의 열린 탭 표에 raf 탭이 30 FPS 기본값으로 표시', state.some(t => t.includes('raf') && t.includes('30 FPS') && t.includes('기본값')), state);
+  } finally {
+    await b.close();
+  }
+}
+
+// ---- 3회차: 배터리 사용 중 기본값 ----
+{
+  const b = await launch(['--framebudget-assume-battery', '--framebudget-battery-default-fps=20',
+                          '--framebudget-sites=localhost=30']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    const r1 = await pa.raf(2);
+    check('9. 배터리: 규칙 없는 127.0.0.1은 배터리 기본값 20', near(r1, 20), r1);
+    await pa.goto(`${B}/raf.html`);
+    const r2 = await pa.raf(2);
+    check('9. 배터리: 규칙 있는 localhost는 규칙값 30', near(r2, 30), r2);
+  } finally {
+    await b.close();
+  }
+}
+
+// ---- 4회차: 비활성 창 ----
+if (keys) {
+  const b = await launch(['--framebudget-inactive-window-fps=10']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    const pb = await newWindow(b, `${B}/raf.html`, 1);
+    await pa.focus();
+    const [a1, b1] = await Promise.all([pa.raf(2), pb.raf(2)]);
+    check('10. 왼쪽 창 활성: 왼쪽은 제한 없음(≥ 55)', median(a1) >= 55, a1);
+    check('10. 왼쪽 창 활성: 오른쪽 비활성 창은 10', near(b1, 10), b1);
+    await pb.focus();
+    const [a2, b2] = await Promise.all([pa.raf(2), pb.raf(2)]);
+    check('10. 오른쪽 창 활성: 왼쪽 비활성 창은 10', near(a2, 10), a2);
+    check('10. 오른쪽 창 활성: 오른쪽은 제한 없음(≥ 55)', median(b2) >= 55, b2);
   } finally {
     await b.close();
   }

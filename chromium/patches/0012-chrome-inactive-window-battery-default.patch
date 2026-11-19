@@ -1,0 +1,571 @@
+From 89262213ff771b07644e611ec2522b1829b8dc04 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:18:42 +0900
+Subject: [PATCH] =?UTF-8?q?chrome:=20=EB=B9=84=ED=99=9C=EC=84=B1=20?=
+ =?UTF-8?q?=EC=B0=BD=20FPS,=20=EB=B0=B0=ED=84=B0=EB=A6=AC=20=EA=B8=B0?=
+ =?UTF-8?q?=EB=B3=B8=EA=B0=92=20=EC=B6=94=EA=B0=80,=20=EB=8B=A8=EC=B6=95?=
+ =?UTF-8?q?=ED=82=A4=20=EC=9E=85=EB=A0=A5=EC=9D=80=20=ED=95=B4=EC=A0=9C?=
+ =?UTF-8?q?=EC=97=90=EC=84=9C=20=EC=A0=9C=EC=99=B8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 비활성 창: framebudget.inactive_window_fps / --framebudget-inactive-window-fps.
+  창이 비활성이면 그 값과 원래 값 중 낮은 쪽을 쓴다. 탭 고정은 그대로 우선한다.
+  BrowserWindowInterface의 활성/비활성 콜백과 TabInterface 삽입 콜백으로 따라간다.
+- 배터리 기본값: framebudget.battery_default_fps / --framebudget-battery-default-fps.
+  배터리로 동작할 때 규칙 없는 사이트의 기본값으로 쓴다. 시험용
+  --framebudget-assume-battery를 둔다. PowerStateObserver로 바뀔 때 다시 적용한다.
+- Alt+Shift+F와 보조키만 누른 입력은 입력 시 해제를 일으키지 않는다.
+  단축키를 누를 때마다 1초 동안 제한이 풀려 새 값이 늦게 보였다.
+- chrome://framebudget 기본값 항목에 두 설정을 추가한다.
+---
+ chrome/browser/ui/framebudget/BUILD.gn        |   4 +
+ .../ui/framebudget/framebudget_policy.cc      |  61 ++++++++++-
+ .../ui/framebudget/framebudget_policy.h       |  23 +++-
+ .../ui/framebudget/framebudget_tab_helper.cc  | 100 +++++++++++++++++-
+ .../ui/framebudget/framebudget_tab_helper.h   |  23 ++++
+ .../browser/ui/framebudget/framebudget_ui.cc  |  40 ++++++-
+ 6 files changed, 240 insertions(+), 11 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index cd9f322582..48594ff671 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -33,8 +33,12 @@ source_set("framebudget") {
+   deps = [
+     "//chrome/browser/ui:browser_window_header",
+     "//chrome/browser/ui:status_bubble",
++    "//chrome/browser/ui/browser_window",
++    "//components/sessions:session_id",
++    "//components/tabs:public",
+     "//components/user_prefs",
+     "//third_party/blink/public/common:headers",
++    "//ui/events:events_base",
+     "//url",
+   ]
+ }
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index cda2118da5..cb3c51e9e0 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -9,6 +9,7 @@
+ #include "base/command_line.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
++#include "base/power_monitor/power_monitor.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+@@ -23,6 +24,9 @@ namespace {
+ constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
+ constexpr char kSitesSwitch[] = "framebudget-sites";
+ constexpr char kNoInputBoostSwitch[] = "framebudget-no-input-boost";
++constexpr char kInactiveWindowFpsSwitch[] = "framebudget-inactive-window-fps";
++constexpr char kBatteryDefaultFpsSwitch[] = "framebudget-battery-default-fps";
++constexpr char kAssumeBatterySwitch[] = "framebudget-assume-battery";
+ constexpr int kMaxFps = 240;
+ 
+ // Returns `value` as an FPS, or nullopt if it is not a number.
+@@ -70,6 +74,15 @@ CommandLineConfig::CommandLineConfig() {
+       no_input_boost_sites.push_back(std::move(host));
+     }
+   }
++  if (command_line.HasSwitch(kInactiveWindowFpsSwitch)) {
++    inactive_window_fps =
++        ParseFps(command_line.GetSwitchValueASCII(kInactiveWindowFpsSwitch));
++  }
++  if (command_line.HasSwitch(kBatteryDefaultFpsSwitch)) {
++    battery_default_fps =
++        ParseFps(command_line.GetSwitchValueASCII(kBatteryDefaultFpsSwitch));
++  }
++  assume_battery = command_line.HasSwitch(kAssumeBatterySwitch);
+ }
+ 
+ CommandLineConfig::~CommandLineConfig() = default;
+@@ -79,6 +92,8 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterDictionaryPref(kSitesPref);
+   registry->RegisterBooleanPref(kInputBoostPref, true);
+   registry->RegisterListPref(kNoInputBoostSitesPref);
++  registry->RegisterIntegerPref(kInactiveWindowFpsPref, 0);
++  registry->RegisterIntegerPref(kBatteryDefaultFpsPref, 0);
+ }
+ 
+ const CommandLineConfig& GetCommandLineConfig() {
+@@ -86,9 +101,19 @@ const CommandLineConfig& GetCommandLineConfig() {
+   return *config;
+ }
+ 
+-Decision Decide(const PrefService& prefs,
+-                std::string_view host,
+-                std::optional<int> tab_override) {
++bool OnBattery() {
++  if (GetCommandLineConfig().assume_battery) {
++    return true;
++  }
++  base::PowerMonitor* monitor = base::PowerMonitor::GetInstance();
++  return monitor->IsInitialized() && monitor->IsOnBatteryPower();
++}
++
++namespace {
++
++Decision DecideIgnoringWindow(const PrefService& prefs,
++                              std::string_view host,
++                              std::optional<int> tab_override) {
+   if (tab_override) {
+     return {ClampFps(*tab_override), Source::kTabOverride, ""};
+   }
+@@ -114,6 +139,13 @@ Decision Decide(const PrefService& prefs,
+     candidate = candidate.substr(dot + 1);
+   }
+ 
++  if (OnBattery()) {
++    const int fps = command_line.battery_default_fps.value_or(
++        ClampFps(prefs.GetInteger(kBatteryDefaultFpsPref)));
++    if (fps > 0) {
++      return {fps, Source::kBatteryDefault, ""};
++    }
++  }
+   if (command_line.default_fps) {
+     return {*command_line.default_fps, Source::kCommandLineDefault, ""};
+   }
+@@ -121,6 +153,25 @@ Decision Decide(const PrefService& prefs,
+           ""};
+ }
+ 
++}  // namespace
++
++Decision Decide(const PrefService& prefs,
++                std::string_view host,
++                std::optional<int> tab_override,
++                bool window_active) {
++  Decision decision = DecideIgnoringWindow(prefs, host, tab_override);
++  if (window_active || decision.source == Source::kTabOverride) {
++    return decision;
++  }
++  const int inactive = GetCommandLineConfig().inactive_window_fps.value_or(
++      ClampFps(prefs.GetInteger(kInactiveWindowFpsPref)));
++  // Only ever lower the rate.
++  if (inactive > 0 && (decision.fps == 0 || inactive < decision.fps)) {
++    return {inactive, Source::kInactiveWindow, ""};
++  }
++  return decision;
++}
++
+ bool InputBoostAllowed(const PrefService& prefs, std::string_view host) {
+   if (!prefs.GetBoolean(kInputBoostPref)) {
+     return false;
+@@ -148,8 +199,12 @@ std::string_view SourceId(Source source) {
+       return "saved-site";
+     case Source::kCommandLineDefault:
+       return "cmdline-default";
++    case Source::kBatteryDefault:
++      return "battery-default";
+     case Source::kSavedDefault:
+       return "default";
++    case Source::kInactiveWindow:
++      return "inactive-window";
+   }
+ }
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 764c88e30a..c4aff1fa4b 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -25,6 +25,12 @@ namespace framebudget {
+ inline constexpr char kDefaultFpsPref[] = "framebudget.default_fps";
+ // Dictionary of host -> FPS. A rule also covers the host's subdomains.
+ inline constexpr char kSitesPref[] = "framebudget.sites";
++// FPS for tabs in a window that is not active. 0 turns it off.
++inline constexpr char kInactiveWindowFpsPref[] =
++    "framebudget.inactive_window_fps";
++// Default FPS while on battery power. 0 keeps the normal default.
++inline constexpr char kBatteryDefaultFpsPref[] =
++    "framebudget.battery_default_fps";
+ // Whether user input briefly lifts the limit of a tab.
+ inline constexpr char kInputBoostPref[] = "framebudget.input_boost";
+ // List of hosts where input never lifts the limit, e.g. games that take
+@@ -38,6 +44,9 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+ //   --framebudget-default-fps=15
+ //   --framebudget-sites=youtube.com=60,example.com=15
+ //   --framebudget-no-input-boost=game.example,play.example
++//   --framebudget-inactive-window-fps=10
++//   --framebudget-battery-default-fps=20
++//   --framebudget-assume-battery  (behave as if on battery, for testing)
+ struct CommandLineConfig {
+   // Parses the current process's command line.
+   CommandLineConfig();
+@@ -50,6 +59,9 @@ struct CommandLineConfig {
+   std::vector<std::pair<std::string, int>> sites;
+   // Hosts where input never lifts the limit.
+   std::vector<std::string> no_input_boost_sites;
++  std::optional<int> inactive_window_fps;
++  std::optional<int> battery_default_fps;
++  bool assume_battery = false;
+ };
+ const CommandLineConfig& GetCommandLineConfig();
+ 
+@@ -58,8 +70,11 @@ enum class Source {
+   kTabOverride,
+   kCommandLineSite,
+   kSavedSite,
++  kBatteryDefault,
+   kCommandLineDefault,
+   kSavedDefault,
++  // Lowers any of the above except kTabOverride while the window is inactive.
++  kInactiveWindow,
+ };
+ 
+ struct Decision {
+@@ -70,10 +85,14 @@ struct Decision {
+ };
+ 
+ // Decides the FPS for a tab showing `host`. `tab_override` is the tab's own
+-// override, if any.
++// override, if any. `window_active` is whether the tab's window is active.
+ Decision Decide(const PrefService& prefs,
+                 std::string_view host,
+-                std::optional<int> tab_override);
++                std::optional<int> tab_override,
++                bool window_active = true);
++
++// Whether the battery default applies now.
++bool OnBattery();
+ 
+ // Whether user input may briefly lift the limit of a tab showing `host`.
+ bool InputBoostAllowed(const PrefService& prefs, std::string_view host);
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index d60eb8e551..079c3122f4 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -13,16 +13,21 @@
+ #include "base/no_destructor.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/power_monitor/power_monitor.h"
+ #include "chrome/browser/ui/browser_window.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/status_bubble.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/prefs/scoped_user_pref_update.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "components/user_prefs/user_prefs.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/frame_rate_throttling.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_keyboard_event.h"
++#include "ui/events/keycodes/keyboard_codes.h"
+ #include "url/gurl.h"
+ 
+ namespace {
+@@ -53,11 +58,38 @@ bool IsActiveInput(const blink::WebInputEvent& event) {
+   using Type = blink::WebInputEvent::Type;
+   const Type type = event.GetType();
+   if (type == Type::kMouseWheel || type == Type::kMouseDown ||
+-      blink::WebInputEvent::IsKeyboardEventType(type) ||
+       blink::WebInputEvent::IsTouchEventType(type) ||
+       blink::WebInputEvent::IsGestureEventType(type)) {
+     return true;
+   }
++  if (blink::WebInputEvent::IsKeyboardEventType(type)) {
++    // Modifier keys alone and the FrameBudget shortcut itself do not mean the
++    // user is using the page.
++    const auto& key = static_cast<const blink::WebKeyboardEvent&>(event);
++    switch (key.windows_key_code) {
++      case ui::VKEY_SHIFT:
++      case ui::VKEY_CONTROL:
++      case ui::VKEY_MENU:
++      case ui::VKEY_LSHIFT:
++      case ui::VKEY_RSHIFT:
++      case ui::VKEY_LCONTROL:
++      case ui::VKEY_RCONTROL:
++      case ui::VKEY_LMENU:
++      case ui::VKEY_RMENU:
++      case ui::VKEY_LWIN:
++      case ui::VKEY_RWIN:
++        return false;
++      default:
++        break;
++    }
++    constexpr int kModifiers =
++        blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kControlKey |
++        blink::WebInputEvent::kAltKey | blink::WebInputEvent::kMetaKey;
++    return !(key.windows_key_code == ui::VKEY_F &&
++             (event.GetModifiers() & kModifiers) ==
++                 (blink::WebInputEvent::kShiftKey |
++                  blink::WebInputEvent::kAltKey));
++  }
+   constexpr int kAnyButton = blink::WebInputEvent::kLeftButtonDown |
+                              blink::WebInputEvent::kMiddleButtonDown |
+                              blink::WebInputEvent::kRightButtonDown;
+@@ -76,6 +108,10 @@ std::string DescribeSource(const framebudget::Decision& decision) {
+       return "실행 옵션 사이트 규칙 (" + decision.rule + ")";
+     case framebudget::Source::kSavedSite:
+       return "사이트 규칙 (" + decision.rule + ")";
++    case framebudget::Source::kBatteryDefault:
++      return "배터리 사용 중 기본값";
++    case framebudget::Source::kInactiveWindow:
++      return "비활성 창";
+     case framebudget::Source::kCommandLineDefault:
+       return "실행 옵션 기본값";
+     case framebudget::Source::kSavedDefault:
+@@ -90,10 +126,13 @@ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+       content::WebContentsUserData<FrameBudgetTabHelper>(*web_contents),
+       id_(NextId()) {
+   Registry().push_back(this);
++  base::PowerMonitor::GetInstance()->AddPowerStateObserver(this);
+   pref_change_registrar_.Init(prefs());
+   for (const char* pref :
+        {framebudget::kDefaultFpsPref, framebudget::kSitesPref,
+-        framebudget::kInputBoostPref, framebudget::kNoInputBoostSitesPref}) {
++        framebudget::kInputBoostPref, framebudget::kNoInputBoostSitesPref,
++        framebudget::kInactiveWindowFpsPref,
++        framebudget::kBatteryDefaultFpsPref}) {
+     pref_change_registrar_.Add(
+         pref, base::BindRepeating(&FrameBudgetTabHelper::Apply,
+                                   base::Unretained(this)));
+@@ -103,6 +142,7 @@ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+ 
+ FrameBudgetTabHelper::~FrameBudgetTabHelper() {
+   std::erase(Registry(), this);
++  base::PowerMonitor::GetInstance()->RemovePowerStateObserver(this);
+ }
+ 
+ // static
+@@ -154,7 +194,8 @@ void FrameBudgetTabHelper::SaveAsSiteRule() {
+ }
+ 
+ framebudget::Decision FrameBudgetTabHelper::Decide() const {
+-  return framebudget::Decide(*prefs(), host(), tab_override_fps_);
++  return framebudget::Decide(*prefs(), host(), tab_override_fps_,
++                             IsWindowActive());
+ }
+ 
+ std::string FrameBudgetTabHelper::host() const {
+@@ -226,7 +267,60 @@ void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
+   widget_observation_.Reset();
+ }
+ 
++void FrameBudgetTabHelper::OnBatteryPowerStatusChange(
++    BatteryPowerStatus battery_power_status) {
++  Apply();
++}
++
++void FrameBudgetTabHelper::ObserveWindow() {
++  tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(
++      web_contents());
++  if (!tab) {
++    return;
++  }
++  if (!tab_inserted_subscription_) {
++    tab_inserted_subscription_ = tab->RegisterDidInsert(base::BindRepeating(
++        &FrameBudgetTabHelper::OnTabInserted, base::Unretained(this)));
++  }
++  BrowserWindowInterface* window = tab->GetBrowserWindowInterface();
++  const SessionID id = window ? window->GetSessionID() : SessionID::InvalidValue();
++  if (id == observed_window_) {
++    return;
++  }
++  observed_window_ = id;
++  window_active_subscription_ = {};
++  window_inactive_subscription_ = {};
++  if (window) {
++    window_active_subscription_ =
++        window->RegisterDidBecomeActive(base::BindRepeating(
++            &FrameBudgetTabHelper::OnWindowActivationChanged,
++            base::Unretained(this)));
++    window_inactive_subscription_ =
++        window->RegisterDidBecomeInactive(base::BindRepeating(
++            &FrameBudgetTabHelper::OnWindowActivationChanged,
++            base::Unretained(this)));
++  }
++}
++
++void FrameBudgetTabHelper::OnTabInserted(tabs::TabInterface* tab) {
++  Apply();
++}
++
++void FrameBudgetTabHelper::OnWindowActivationChanged(
++    BrowserWindowInterface* window) {
++  Apply();
++}
++
++bool FrameBudgetTabHelper::IsWindowActive() const {
++  tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(
++      web_contents());
++  BrowserWindowInterface* window =
++      tab ? tab->GetBrowserWindowInterface() : nullptr;
++  return !window || window->IsActive();
++}
++
+ void FrameBudgetTabHelper::Apply() {
++  ObserveWindow();
+   content::RenderWidgetHost* widget =
+       web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
+   ObserveWidget(widget);
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index bff524a9dc..e86b38eec1 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -9,19 +9,27 @@
+ #include <string>
+ #include <vector>
+ 
++#include "base/callback_list.h"
++#include "base/power_monitor/power_observer.h"
+ #include "base/scoped_observation.h"
+ #include "base/time/time.h"
+ #include "base/timer/timer.h"
+ #include "chrome/browser/ui/framebudget/framebudget_policy.h"
+ #include "components/prefs/pref_change_registrar.h"
++#include "components/sessions/core/session_id.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
+ #include "content/public/browser/render_widget_host.h"
+ #include "content/public/browser/render_widget_host_observer.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ 
++class BrowserWindowInterface;
+ class PrefService;
+ 
++namespace tabs {
++class TabInterface;
++}
++
+ // FrameBudget: limits how often a tab's web content produces frames, while the
+ // browser UI and the monitor keep their normal refresh rate. The FPS of a tab
+ // is decided by framebudget::Decide() from, in order of priority, the tab's
+@@ -35,6 +43,7 @@ class FrameBudgetTabHelper
+     : public content::WebContentsObserver,
+       public content::RenderWidgetHost::InputEventObserver,
+       public content::RenderWidgetHostObserver,
++      public base::PowerStateObserver,
+       public content::WebContentsUserData<FrameBudgetTabHelper> {
+  public:
+   FrameBudgetTabHelper(const FrameBudgetTabHelper&) = delete;
+@@ -86,6 +95,16 @@ class FrameBudgetTabHelper
+   // content::RenderWidgetHostObserver:
+   void RenderWidgetHostDestroyed(content::RenderWidgetHost* widget) override;
+ 
++  // base::PowerStateObserver:
++  void OnBatteryPowerStatusChange(
++      BatteryPowerStatus battery_power_status) override;
++
++  // Follows the tab's window so that its activation changes the limit.
++  void ObserveWindow();
++  void OnTabInserted(tabs::TabInterface* tab);
++  void OnWindowActivationChanged(BrowserWindowInterface* window);
++  bool IsWindowActive() const;
++
+   // Sends the tab's limit to viz when its frame sink or FPS has changed.
+   void Apply();
+ 
+@@ -112,6 +131,10 @@ class FrameBudgetTabHelper
+   base::ScopedObservation<content::RenderWidgetHost,
+                           content::RenderWidgetHostObserver>
+       widget_observation_{this};
++  base::CallbackListSubscription tab_inserted_subscription_;
++  base::CallbackListSubscription window_active_subscription_;
++  base::CallbackListSubscription window_inactive_subscription_;
++  SessionID observed_window_ = SessionID::InvalidValue();
+ 
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 3c60e7b3c0..37c3636e6b 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -49,6 +49,9 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   <h2>기본값</h2>
+   <label>규칙이 없는 사이트 <span id="default"></span></label>
+   <p class="note" id="default-note"></p>
++  <label>포커스 없는 창 <span id="inactive"></span></label>
++  <label>배터리 사용 중 규칙이 없는 사이트 <span id="battery"></span></label>
++  <p class="note" id="power-note"></p>
+   <label><input type="checkbox" id="boost"> 스크롤·입력 중에는 잠깐 제한 풀기</label>
+ </section>
+ 
+@@ -108,6 +111,8 @@ const SOURCE = {
+   'cmdline-site': '실행 옵션 사이트 규칙',
+   'saved-site': '사이트 규칙',
+   'cmdline-default': '실행 옵션 기본값',
++  'battery-default': '배터리 사용 중 기본값',
++  'inactive-window': '비활성 창',
+   'default': '기본값',
+ };
+ 
+@@ -156,6 +161,15 @@ function render(state) {
+       '' :
+       `실행 옵션 --framebudget-default-fps=${state.commandLineDefaultFps} 이 우선 적용되고 있습니다.`;
+   $('boost').checked = state.inputBoost;
++  // 0은 '쓰지 않음'이라 기본 선택지의 '제한 없음' 대신 이름을 바꿔 보여 줍니다.
++  const offSelect = (value, msg) => {
++    const select = fpsSelect(value, (fps) => chrome.send(msg, [fps]));
++    select.options[0].text = '쓰지 않음';
++    return select;
++  };
++  $('inactive').replaceChildren(offSelect(state.inactiveWindowFps, 'setInactiveWindowFps'));
++  $('battery').replaceChildren(offSelect(state.batteryDefaultFps, 'setBatteryDefaultFps'));
++  $('power-note').textContent = state.onBattery ? '지금 배터리로 동작 중입니다.' : '';
+ 
+   $('sites').replaceChildren(...state.sites.map((site) => {
+     const boost = el('input');
+@@ -273,6 +287,10 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     Register("getState", &FrameBudgetHandler::HandleGetState);
+     Register("setDefaultFps", &FrameBudgetHandler::HandleSetDefaultFps);
+     Register("setInputBoost", &FrameBudgetHandler::HandleSetInputBoost);
++    Register("setInactiveWindowFps",
++             &FrameBudgetHandler::HandleSetInactiveWindowFps);
++    Register("setBatteryDefaultFps",
++             &FrameBudgetHandler::HandleSetBatteryDefaultFps);
+     Register("setSiteRule", &FrameBudgetHandler::HandleSetSiteRule);
+     Register("removeSiteRule", &FrameBudgetHandler::HandleRemoveSiteRule);
+     Register("setSiteInputBoost",
+@@ -308,16 +326,27 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+ 
+   void HandleGetState(const base::ListValue& args) { SendState(); }
+ 
+-  void HandleSetDefaultFps(const base::ListValue& args) {
++  void SetFpsPref(const char* pref, const base::ListValue& args) {
+     if (args.size() == 1) {
+       if (std::optional<int> fps = GetInt(args[0])) {
+-        prefs()->SetInteger(framebudget::kDefaultFpsPref,
+-                            framebudget::ClampFps(*fps));
++        prefs()->SetInteger(pref, framebudget::ClampFps(*fps));
+       }
+     }
+     SendState();
+   }
+ 
++  void HandleSetDefaultFps(const base::ListValue& args) {
++    SetFpsPref(framebudget::kDefaultFpsPref, args);
++  }
++
++  void HandleSetInactiveWindowFps(const base::ListValue& args) {
++    SetFpsPref(framebudget::kInactiveWindowFpsPref, args);
++  }
++
++  void HandleSetBatteryDefaultFps(const base::ListValue& args) {
++    SetFpsPref(framebudget::kBatteryDefaultFpsPref, args);
++  }
++
+   void HandleSetInputBoost(const base::ListValue& args) {
+     if (args.size() == 1 && args[0].is_bool()) {
+       prefs()->SetBoolean(framebudget::kInputBoostPref, args[0].GetBool());
+@@ -400,6 +429,11 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     }
+     state.Set("inputBoost",
+               prefs()->GetBoolean(framebudget::kInputBoostPref));
++    state.Set("inactiveWindowFps",
++              prefs()->GetInteger(framebudget::kInactiveWindowFpsPref));
++    state.Set("batteryDefaultFps",
++              prefs()->GetInteger(framebudget::kBatteryDefaultFpsPref));
++    state.Set("onBattery", framebudget::OnBattery());
+ 
+     const base::ListValue& no_boost =
+         prefs()->GetList(framebudget::kNoInputBoostSitesPref);
+-- 
+2.53.0
+

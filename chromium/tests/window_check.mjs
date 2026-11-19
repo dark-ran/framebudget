@@ -254,7 +254,7 @@ function check(name, ok, data) {
 // ---- 3회차: 배터리 사용 중 기본값 ----
 {
   const b = await launch(['--framebudget-assume-battery', '--framebudget-battery-default-fps=20',
-                          '--framebudget-sites=localhost=30']);
+                          '--framebudget-sites=localhost=30', '--framebudget-low-res=127.0.0.1']);
   try {
     const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
     const pa = await attach(b, first.targetId, 0);
@@ -264,6 +264,13 @@ function check(name, ok, data) {
     await pa.goto(`${B}/raf.html`);
     const r2 = await pa.raf(2);
     check('9. 배터리: 규칙 있는 localhost는 규칙값 30', near(r2, 30), r2);
+
+    // 저해상도 모드는 페이지가 보는 devicePixelRatio를 절반으로 낮춥니다.
+    const dprB = await pa.eval('devicePixelRatio');
+    await pa.goto(`${A}/raf.html`);
+    const dprA = await pa.eval('devicePixelRatio');
+    check('11. 저해상도: 127.0.0.1은 devicePixelRatio 0.5', dprA === 0.5, dprA);
+    check('11. 저해상도: 지정하지 않은 localhost는 1', dprB === 1, dprB);
   } finally {
     await b.close();
   }

@@ -1,0 +1,390 @@
+From d9022f94e16b99960d09e4150b40307fbd0385ca Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:25:37 +0900
+Subject: [PATCH] =?UTF-8?q?chrome:=20=EC=82=AC=EC=9D=B4=ED=8A=B8=EB=B3=84?=
+ =?UTF-8?q?=20=EC=A0=80=ED=95=B4=EC=83=81=EB=8F=84=20=EB=AA=A8=EB=93=9C=20?=
+ =?UTF-8?q?=EC=B6=94=EA=B0=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+framebudget.low_res_sites / --framebudget-low-res로 지정한 사이트는
+devicePixelRatio 0.5로 그리고 컴포지터가 늘려 보여 준다. 캔버스를
+devicePixelRatio로 잡는 페이지는 그리는 픽셀이 1/4이 된다. WebGL 버퍼만
+몰래 줄이면 gl.viewport(0, 0, canvas.width, ...)를 쓰는 페이지가 잘리므로
+DevTools 기기 에뮬레이션과 같은 경로를 content 공개 API
+SetFrameBudgetDeviceScaleFactor로 연다. chrome://framebudget 사이트 규칙에
+'저해상도' 체크 상자를 둔다.
+---
+ .../ui/framebudget/framebudget_policy.cc      | 30 +++++++++--
+ .../ui/framebudget/framebudget_policy.h       | 11 ++++
+ .../ui/framebudget/framebudget_tab_helper.cc  | 16 +++++-
+ .../ui/framebudget/framebudget_tab_helper.h   |  2 +
+ .../browser/ui/framebudget/framebudget_ui.cc  | 50 +++++++++++++++----
+ .../frame_rate_throttling.cc                  | 21 ++++++++
+ .../public/browser/frame_rate_throttling.h    | 10 ++++
+ 7 files changed, 125 insertions(+), 15 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index cb3c51e9e0..8c5816253e 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -24,6 +24,7 @@ namespace {
+ constexpr char kDefaultFpsSwitch[] = "framebudget-default-fps";
+ constexpr char kSitesSwitch[] = "framebudget-sites";
+ constexpr char kNoInputBoostSwitch[] = "framebudget-no-input-boost";
++constexpr char kLowResSwitch[] = "framebudget-low-res";
+ constexpr char kInactiveWindowFpsSwitch[] = "framebudget-inactive-window-fps";
+ constexpr char kBatteryDefaultFpsSwitch[] = "framebudget-battery-default-fps";
+ constexpr char kAssumeBatterySwitch[] = "framebudget-assume-battery";
+@@ -67,11 +68,15 @@ CommandLineConfig::CommandLineConfig() {
+     }
+     sites.emplace_back(std::move(host), *fps);
+   }
+-  for (std::string_view site : base::SplitStringPiece(
+-           command_line.GetSwitchValueASCII(kNoInputBoostSwitch), ",",
+-           base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
+-    if (std::string host = NormalizeHost(site); !host.empty()) {
+-      no_input_boost_sites.push_back(std::move(host));
++  for (auto [switch_name, list] :
++       {std::pair(kNoInputBoostSwitch, &no_input_boost_sites),
++        std::pair(kLowResSwitch, &low_res_sites)}) {
++    for (std::string_view site : base::SplitStringPiece(
++             command_line.GetSwitchValueASCII(switch_name), ",",
++             base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++      if (std::string host = NormalizeHost(site); !host.empty()) {
++        list->push_back(std::move(host));
++      }
+     }
+   }
+   if (command_line.HasSwitch(kInactiveWindowFpsSwitch)) {
+@@ -92,6 +97,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterDictionaryPref(kSitesPref);
+   registry->RegisterBooleanPref(kInputBoostPref, true);
+   registry->RegisterListPref(kNoInputBoostSitesPref);
++  registry->RegisterListPref(kLowResSitesPref);
+   registry->RegisterIntegerPref(kInactiveWindowFpsPref, 0);
+   registry->RegisterIntegerPref(kBatteryDefaultFpsPref, 0);
+ }
+@@ -189,6 +195,20 @@ bool InputBoostAllowed(const PrefService& prefs, std::string_view host) {
+   return true;
+ }
+ 
++bool LowResEnabled(const PrefService& prefs, std::string_view host) {
++  for (const std::string& site : GetCommandLineConfig().low_res_sites) {
++    if (HostMatches(host, site)) {
++      return true;
++    }
++  }
++  for (const base::Value& site : prefs.GetList(kLowResSitesPref)) {
++    if (site.is_string() && HostMatches(host, site.GetString())) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ std::string_view SourceId(Source source) {
+   switch (source) {
+     case Source::kTabOverride:
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index c4aff1fa4b..261bf108e6 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -37,6 +37,11 @@ inline constexpr char kInputBoostPref[] = "framebudget.input_boost";
+ // continuous input. A host also covers its subdomains.
+ inline constexpr char kNoInputBoostSitesPref[] =
+     "framebudget.no_input_boost_sites";
++// List of hosts rendered at a lower resolution (kLowResScale).
++inline constexpr char kLowResSitesPref[] = "framebudget.low_res_sites";
++// shortcut: one fixed scale for every low-res site; make it a setting if users
++// need to pick per site.
++inline constexpr float kLowResScale = 0.5f;
+ 
+ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+ 
+@@ -44,6 +49,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+ //   --framebudget-default-fps=15
+ //   --framebudget-sites=youtube.com=60,example.com=15
+ //   --framebudget-no-input-boost=game.example,play.example
++//   --framebudget-low-res=game.example,play.example
+ //   --framebudget-inactive-window-fps=10
+ //   --framebudget-battery-default-fps=20
+ //   --framebudget-assume-battery  (behave as if on battery, for testing)
+@@ -59,6 +65,8 @@ struct CommandLineConfig {
+   std::vector<std::pair<std::string, int>> sites;
+   // Hosts where input never lifts the limit.
+   std::vector<std::string> no_input_boost_sites;
++  // Hosts rendered at a lower resolution.
++  std::vector<std::string> low_res_sites;
+   std::optional<int> inactive_window_fps;
+   std::optional<int> battery_default_fps;
+   bool assume_battery = false;
+@@ -97,6 +105,9 @@ bool OnBattery();
+ // Whether user input may briefly lift the limit of a tab showing `host`.
+ bool InputBoostAllowed(const PrefService& prefs, std::string_view host);
+ 
++// Whether a tab showing `host` renders at kLowResScale.
++bool LowResEnabled(const PrefService& prefs, std::string_view host);
++
+ // Stable identifier of `source`, used by chrome://framebudget.
+ std::string_view SourceId(Source source);
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 079c3122f4..767f0f5a93 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -131,7 +131,7 @@ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+   for (const char* pref :
+        {framebudget::kDefaultFpsPref, framebudget::kSitesPref,
+         framebudget::kInputBoostPref, framebudget::kNoInputBoostSitesPref,
+-        framebudget::kInactiveWindowFpsPref,
++        framebudget::kInactiveWindowFpsPref, framebudget::kLowResSitesPref,
+         framebudget::kBatteryDefaultFpsPref}) {
+     pref_change_registrar_.Add(
+         pref, base::BindRepeating(&FrameBudgetTabHelper::Apply,
+@@ -259,6 +259,8 @@ void FrameBudgetTabHelper::PrimaryMainFrameRenderProcessGone(
+   // next Apply() sends it again.
+   applied_frame_sink_id_ = viz::FrameSinkId();
+   applied_interval_ = base::TimeDelta();
++  low_res_frame_sink_id_ = viz::FrameSinkId();
++  applied_low_res_ = false;
+ }
+ 
+ void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
+@@ -331,6 +333,18 @@ void FrameBudgetTabHelper::Apply() {
+   }
+   const viz::FrameSinkId frame_sink_id =
+       widget ? widget->GetFrameSinkId() : viz::FrameSinkId();
++
++  // A new widget starts without emulation, so re-send when the widget changes.
++  const bool low_res = framebudget::LowResEnabled(*prefs(), host());
++  if (widget && (frame_sink_id != low_res_frame_sink_id_ ||
++                 low_res != applied_low_res_)) {
++    if (low_res || applied_low_res_) {
++      content::SetFrameBudgetDeviceScaleFactor(
++          widget, low_res ? framebudget::kLowResScale : 0);
++    }
++    low_res_frame_sink_id_ = frame_sink_id;
++    applied_low_res_ = low_res;
++  }
+   const int fps = boosted_ ? 0 : Decide().fps;
+   const base::TimeDelta interval =
+       fps > 0 ? base::Hertz(fps) : base::TimeDelta();
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index e86b38eec1..9bab40d1e3 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -121,6 +121,8 @@ class FrameBudgetTabHelper
+   bool boosted_ = false;
+   viz::FrameSinkId applied_frame_sink_id_;
+   base::TimeDelta applied_interval_;
++  bool applied_low_res_ = false;
++  viz::FrameSinkId low_res_frame_sink_id_;
+ 
+   base::OneShotTimer boost_timer_;
+   base::OneShotTimer indicator_timer_;
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 37c3636e6b..0db25b3520 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -59,7 +59,7 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   <h2>사이트 규칙</h2>
+   <p class="note">하위 도메인에도 적용됩니다. 더 구체적인 도메인 규칙이 우선합니다.</p>
+   <table>
+-    <thead><tr><th>사이트</th><th>FPS</th><th>입력 시 해제</th><th></th></tr></thead>
++    <thead><tr><th>사이트</th><th>FPS</th><th>입력 시 해제</th><th>저해상도</th><th></th></tr></thead>
+     <tbody id="sites"></tbody>
+   </table>
+   <form id="add-site">
+@@ -68,7 +68,8 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+     <button type="submit">추가</button>
+   </form>
+   <div id="cmdline-sites"></div>
+-  <p class="note">게임처럼 계속 입력하는 사이트는 "입력 시 해제"를 끄면 입력 중에도 제한이 유지됩니다.</p>
++  <p class="note">게임처럼 계속 입력하는 사이트는 "입력 시 해제"를 끄면 입력 중에도 제한이 유지됩니다.
++  "저해상도"를 켜면 그 사이트를 절반 해상도로 그린 뒤 늘려 보여 줍니다. 화면은 흐려지지만 그리는 픽셀이 1/4로 줄어듭니다.</p>
+ </section>
+ 
+ <section>
+@@ -178,10 +179,15 @@ function render(state) {
+     boost.disabled = !state.inputBoost;
+     boost.title = state.inputBoost ? '' : '기본값에서 입력 시 해제가 꺼져 있습니다.';
+     boost.onchange = () => chrome.send('setSiteInputBoost', [site.host, boost.checked]);
++    const lowRes = el('input');
++    lowRes.type = 'checkbox';
++    lowRes.checked = site.lowRes;
++    lowRes.onchange = () => chrome.send('setSiteLowRes', [site.host, lowRes.checked]);
+     return row(
+         site.host,
+         fpsSelect(site.fps, (fps) => chrome.send('setSiteRule', [site.host, fps])),
+         boost,
++        lowRes,
+         button('삭제', () => chrome.send('removeSiteRule', [site.host])));
+   }));
+   $('new-fps').replaceChildren(fpsSelect(newFps, (fps) => { newFps = fps; }));
+@@ -192,6 +198,9 @@ function render(state) {
+     cmdline.append(el('p', '실행 옵션 규칙 (저장된 규칙보다 우선, 여기서 바꿀 수 없음): ' +
+         state.commandLineSites.map((s) => `${s.host}=${fpsLabel(s.fps)}`).join(', ')));
+   }
++  if (state.commandLineLowRes.length) {
++    cmdline.append(el('p', '실행 옵션으로 저해상도를 켠 사이트: ' + state.commandLineLowRes.join(', ')));
++  }
+   if (state.commandLineNoInputBoost.length) {
+     cmdline.append(el('p', '실행 옵션으로 입력 시 해제를 끈 사이트: ' +
+         state.commandLineNoInputBoost.join(', ')));
+@@ -295,6 +304,7 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     Register("removeSiteRule", &FrameBudgetHandler::HandleRemoveSiteRule);
+     Register("setSiteInputBoost",
+              &FrameBudgetHandler::HandleSetSiteInputBoost);
++    Register("setSiteLowRes", &FrameBudgetHandler::HandleSetSiteLowRes);
+     Register("setTabOverride", &FrameBudgetHandler::HandleSetTabOverride);
+     Register("saveTabAsSiteRule", &FrameBudgetHandler::HandleSaveTabAsSiteRule);
+   }
+@@ -370,21 +380,24 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     if (args.size() == 1 && args[0].is_string()) {
+       ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)
+           ->Remove(args[0].GetString());
+-      ScopedListPrefUpdate(prefs(), framebudget::kNoInputBoostSitesPref)
+-          ->EraseValue(base::Value(args[0].GetString()));
++      for (const char* pref : {framebudget::kNoInputBoostSitesPref,
++                               framebudget::kLowResSitesPref}) {
++        ScopedListPrefUpdate(prefs(), pref)
++            ->EraseValue(base::Value(args[0].GetString()));
++      }
+     }
+     SendState();
+   }
+ 
+-  // Args: host, whether input may lift the limit on that host.
+-  void HandleSetSiteInputBoost(const base::ListValue& args) {
++  // Args: host, whether the host is in the list `pref`.
++  void SetSiteInList(const char* pref, const base::ListValue& args,
++                     bool in_list_when_true) {
+     if (args.size() == 2 && args[0].is_string() && args[1].is_bool()) {
+       const std::string host = framebudget::NormalizeHost(args[0].GetString());
+       if (!host.empty()) {
+-        ScopedListPrefUpdate update(prefs(),
+-                                    framebudget::kNoInputBoostSitesPref);
++        ScopedListPrefUpdate update(prefs(), pref);
+         update->EraseValue(base::Value(host));
+-        if (!args[1].GetBool()) {
++        if (args[1].GetBool() == in_list_when_true) {
+           update->Append(host);
+         }
+       }
+@@ -392,6 +405,16 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     SendState();
+   }
+ 
++  // Args: host, whether input may lift the limit on that host.
++  void HandleSetSiteInputBoost(const base::ListValue& args) {
++    SetSiteInList(framebudget::kNoInputBoostSitesPref, args, false);
++  }
++
++  // Args: host, whether the host renders at a lower resolution.
++  void HandleSetSiteLowRes(const base::ListValue& args) {
++    SetSiteInList(framebudget::kLowResSitesPref, args, true);
++  }
++
+   // Args: tab id, FPS (negative clears the override).
+   void HandleSetTabOverride(const base::ListValue& args) {
+     if (args.size() == 2) {
+@@ -437,6 +460,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+ 
+     const base::ListValue& no_boost =
+         prefs()->GetList(framebudget::kNoInputBoostSitesPref);
++    const base::ListValue& low_res =
++        prefs()->GetList(framebudget::kLowResSitesPref);
+     base::ListValue sites;
+     for (const auto [host, value] :
+          prefs()->GetDict(framebudget::kSitesPref)) {
+@@ -445,6 +470,7 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+         site.Set("host", host);
+         site.Set("fps", *fps);
+         site.Set("inputBoost", !no_boost.contains(host));
++        site.Set("lowRes", low_res.contains(host));
+         sites.Append(std::move(site));
+       }
+     }
+@@ -465,6 +491,12 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     }
+     state.Set("commandLineNoInputBoost", std::move(command_line_no_boost));
+ 
++    base::ListValue command_line_low_res;
++    for (const std::string& host : command_line.low_res_sites) {
++      command_line_low_res.Append(host);
++    }
++    state.Set("commandLineLowRes", std::move(command_line_low_res));
++
+     base::ListValue tabs;
+     for (FrameBudgetTabHelper* helper : FrameBudgetTabHelper::GetAll()) {
+       content::WebContents* contents = helper->web_contents();
+diff --git a/content/browser/performance_manager/frame_rate_throttling.cc b/content/browser/performance_manager/frame_rate_throttling.cc
+index 5341935cf2..5a7e1d77e3 100644
+--- a/content/browser/performance_manager/frame_rate_throttling.cc
++++ b/content/browser/performance_manager/frame_rate_throttling.cc
+@@ -12,6 +12,7 @@
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+ #include "content/browser/renderer_host/render_widget_host_impl.h"
+ #include "content/public/browser/browser_thread.h"
++#include "third_party/blink/public/common/widget/device_emulation_params.h"
+ 
+ namespace content {
+ 
+@@ -64,4 +65,24 @@ CONTENT_EXPORT void SetFrameBudgetForFrameSink(
+   GetHostFrameSinkManager()->SetFrameBudgetInterval(frame_sink_id, interval);
+ }
+ 
++void SetFrameBudgetDeviceScaleFactor(RenderWidgetHost* widget,
++                                     float device_scale_factor) {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  auto& frame_widget =
++      static_cast<RenderWidgetHostImpl*>(widget)->GetAssociatedFrameWidget();
++  if (!frame_widget) {
++    return;
++  }
++  if (device_scale_factor <= 0) {
++    frame_widget->DisableDeviceEmulation();
++    return;
++  }
++  blink::DeviceEmulationParams params;
++  params.screen_type = blink::mojom::EmulatedScreenType::kDesktop;
++  params.device_scale_factor = device_scale_factor;
++  params.scale = 1;
++  frame_widget->EnableDeviceEmulation(
++      params, blink::mojom::DeviceEmulationCacheBehavior::kKeepCache);
++}
++
+ }  // namespace content
+diff --git a/content/public/browser/frame_rate_throttling.h b/content/public/browser/frame_rate_throttling.h
+index d741ba674e..79c24148d3 100644
+--- a/content/public/browser/frame_rate_throttling.h
++++ b/content/public/browser/frame_rate_throttling.h
+@@ -17,6 +17,8 @@ class FrameSinkId;
+ 
+ namespace content {
+ 
++class RenderWidgetHost;
++
+ // Signals the frame sink manager that all current and future frame sinks should
+ // start sending BeginFrames at an interval that is at least as long `interval`.
+ // Because there is a single viz process, which itself contains a single host
+@@ -69,6 +71,14 @@ CONTENT_EXPORT void SetFrameBudgetForFrameSink(
+     const viz::FrameSinkId& frame_sink_id,
+     base::TimeDelta interval);
+ 
++// FrameBudget: makes the page in `widget` render at `device_scale_factor`
++// (e.g. 0.5) while keeping its layout size; the compositor scales the result
++// up. Pages that size canvases by devicePixelRatio then draw fewer pixels. A
++// non-positive value turns it off. This uses the same mechanism as DevTools
++// device emulation and replaces any emulation DevTools has set on `widget`.
++CONTENT_EXPORT void SetFrameBudgetDeviceScaleFactor(RenderWidgetHost* widget,
++                                                    float device_scale_factor);
++
+ }  // namespace content
+ 
+ #endif  // CONTENT_PUBLIC_BROWSER_FRAME_RATE_THROTTLING_H_
+-- 
+2.53.0
+

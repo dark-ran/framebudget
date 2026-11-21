@@ -26,8 +26,8 @@ const ts = () => ((Date.now() - t0) / 1000).toFixed(1);
 // 127.0.0.1과 localhost를 서로 다른 사이트로 쓰기 위해 IPv4·IPv6 모두에서 받습니다.
 const server = createServer((req, res) => {
   const name = req.url.slice(1).split('?')[0];
-  if (!['raf.html', 'css.html', 'frame.html'].includes(name)) { res.writeHead(404).end(); return; }
-  res.writeHead(200, {'content-type': 'text/html'}).end(readFileSync(join(here, name)));
+  if (!['raf.html', 'css.html', 'frame.html', 'video.html', 'test.webm'].includes(name)) { res.writeHead(404).end(); return; }
+  res.writeHead(200, {'content-type': name.endsWith('.webm') ? 'video/webm' : 'text/html'}).end(readFileSync(join(here, name)));
 }).listen(0, '::');
 await new Promise(r => server.once('listening', r));
 const port = server.address().port;
@@ -292,6 +292,25 @@ if (keys) {
     const [a2, b2] = await Promise.all([pa.raf(2), pb.raf(2)]);
     check('10. 오른쪽 창 활성: 왼쪽 비활성 창은 10', near(a2, 10), a2);
     check('10. 오른쪽 창 활성: 오른쪽은 제한 없음(≥ 55)', median(b2) >= 55, b2);
+  } finally {
+    await b.close();
+  }
+}
+
+// ---- 5회차: 영상 재생 중 제한 해제 ----
+{
+  const b = await launch(['--framebudget-sites=127.0.0.1=15', '--framebudget-lift-during-video']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/video.html`);
+    const playing = await pa.raf(2);
+    // 가상 화면에서는 영상 재생만으로도 30FPS 안팎이 한계라, 15 상한보다 확실히 높은지만 봅니다.
+    check('12. 영상 재생 중에는 제한 해제(15 상한보다 높음, ≥ 20)', median(playing) >= 20, playing);
+    await pa.eval('document.getElementById("v").pause()');
+    await sleep(1500);
+    const paused = await pa.raf(2);
+    check('12. 영상을 멈추면 다시 15', near(paused, 15), paused);
   } finally {
     await b.close();
   }

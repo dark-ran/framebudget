@@ -24,13 +24,14 @@ FrameBudget 기능은 Chromium 원본 소스에 적용하는 패치로 제공합
 | 0011 | 수정: 간격을 반올림하지 않고 상한으로 지킴 (100Hz에서 30FPS가 33FPS가 되던 문제) |
 | 0012 | chrome: 비활성 창 FPS, 배터리 사용 중 기본값, 단축키 입력은 입력 시 해제에서 제외 |
 | 0013 | content·chrome: 사이트별 저해상도 모드 (devicePixelRatio 0.5) |
+| 0014 | chrome: 영상이 재생되는 탭은 제한 풀기 (선택) |
 
 0004, 0005, 0008, 0010, 0011은 빌드와 시험에서 나온 오류를 고친 기록입니다. 기능 패치에 합치지 않고 따로 남겼습니다.
 
 - `GURL::host()`가 `std::string_view`를 돌려주는데 `std::string`으로 암시 변환하고 있었습니다.
 - `BrowserContext`가 전방 선언만 되어 있어서 `UserPrefs::Get()`에 넘길 수 없었습니다.
 
-13개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
+14개 패치를 `156.0.8078.48`에 순서대로 적용한 결과가 실제로 빌드한 소스 트리와 같은 것을 git 트리 해시로 확인했습니다.
 
 ## 빌드 방법
 
@@ -88,6 +89,7 @@ out/Default/chrome
 - **포커스 없는 창:** 다른 창을 보는 동안 그 창의 탭을 더 낮은 FPS로 제한합니다. `chrome://framebudget`의 "포커스 없는 창"이나 `--framebudget-inactive-window-fps=10`으로 정합니다. 원래 값보다 낮을 때만 적용하고, Alt+Shift+F로 고정한 탭은 그대로 둡니다.
 - **배터리 사용 중 기본값:** 배터리로 동작할 때 규칙 없는 사이트에 쓸 기본값입니다. "배터리 사용 중 규칙이 없는 사이트"나 `--framebudget-battery-default-fps=20`으로 정합니다. 배터리가 없는 PC에서 시험할 때는 `--framebudget-assume-battery`를 붙입니다.
 - Alt+Shift+F와 Alt·Shift 같은 보조키만 누른 입력은 "입력 시 해제"를 일으키지 않습니다.
+- **영상 재생 중 해제:** 켜 두면 영상이 재생되는 동안 그 탭의 제한을 풉니다. 기본값을 낮게 잡아도 페이지에 끼워 넣은 영상이 끊기지 않습니다. `chrome://framebudget`의 "영상이 재생되는 탭은 제한 풀기"나 `--framebudget-lift-during-video`로 켭니다. Alt+Shift+F로 고정한 탭은 그대로 둡니다. 이 기능은 아직 시험하지 않았습니다.
 - **저해상도 모드:** 지정한 사이트를 devicePixelRatio 0.5로 그리고, 컴포지터가 원래 크기로 늘려 보여 줍니다. 화면은 흐려지지만 캔버스를 devicePixelRatio로 잡는 페이지는 그리는 픽셀이 1/4이 됩니다. `chrome://framebudget` 사이트 규칙의 "저해상도"나 `--framebudget-low-res=game.example`로 켭니다.
   - WebGL 버퍼만 몰래 줄이는 방법은 쓰지 않았습니다. `gl.viewport(0, 0, canvas.width, canvas.height)`처럼 캔버스 크기를 그대로 쓰는 페이지가 잘리기 때문입니다.
   - DevTools 기기 에뮬레이션과 같은 경로를 쓰므로, 저해상도 사이트에서 DevTools 기기 에뮬레이션을 함께 쓰면 서로 덮어씁니다.

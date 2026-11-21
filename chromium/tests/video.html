@@ -1,0 +1,8 @@
+<!doctype html><title>video</title>
+<!-- 반복 재생하는 영상과 rAF 카운터. 영상 재생 중 제한 해제를 시험합니다. -->
+<video id=v src=test.webm muted loop autoplay width=320 height=180></video>
+<script>
+let n=0;window.counts=[];
+function f(){n++;requestAnimationFrame(f)}
+requestAnimationFrame(f);setInterval(()=>{window.counts.push(n);n=0},1000);
+</script>

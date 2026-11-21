@@ -277,18 +277,21 @@ function check(name, ok, data) {
 }
 
 // ---- 4회차: 비활성 창 ----
-if (keys) {
+// 클릭 대신 Target.activateTarget으로 창을 활성화하므로 실제 화면에서도 돌립니다.
+{
   const b = await launch(['--framebudget-inactive-window-fps=10']);
   try {
     const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
     const pa = await attach(b, first.targetId, 0);
     await pa.goto(`${A}/raf.html`);
     const pb = await newWindow(b, `${B}/raf.html`, 1);
-    await pa.focus();
+    await b.send('Target.activateTarget', {targetId: pa.targetId});
+    await sleep(1500);
     const [a1, b1] = await Promise.all([pa.raf(2), pb.raf(2)]);
     check('10. 왼쪽 창 활성: 왼쪽은 제한 없음(≥ 55)', median(a1) >= 55, a1);
     check('10. 왼쪽 창 활성: 오른쪽 비활성 창은 10', near(b1, 10), b1);
-    await pb.focus();
+    await b.send('Target.activateTarget', {targetId: pb.targetId});
+    await sleep(1500);
     const [a2, b2] = await Promise.all([pa.raf(2), pb.raf(2)]);
     check('10. 오른쪽 창 활성: 왼쪽 비활성 창은 10', near(a2, 10), a2);
     check('10. 오른쪽 창 활성: 오른쪽은 제한 없음(≥ 55)', median(b2) >= 55, b2);

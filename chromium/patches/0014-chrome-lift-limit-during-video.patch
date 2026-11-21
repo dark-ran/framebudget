@@ -1,0 +1,285 @@
+From e7ca92b4ed6c9be9246ed836c059fe5ab3485bba Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 12:19:22 +0900
+Subject: [PATCH] =?UTF-8?q?chrome:=20=EC=98=81=EC=83=81=EC=9D=B4=20?=
+ =?UTF-8?q?=EC=9E=AC=EC=83=9D=EB=90=98=EB=8A=94=20=ED=83=AD=EC=9D=80=20?=
+ =?UTF-8?q?=EC=A0=9C=ED=95=9C=EC=9D=84=20=ED=92=80=20=EC=88=98=20=EC=9E=88?=
+ =?UTF-8?q?=EA=B2=8C=20=ED=95=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+framebudget.lift_during_video / --framebudget-lift-during-video를 켜면
+영상이 있는 미디어가 재생되는 동안 그 탭의 제한을 푼다. 기본값을 낮게 잡아도
+페이지에 끼워 넣은 영상이 끊기지 않게 하려는 것이다. 탭 고정은 그대로
+우선한다. WebContentsObserver::MediaStarted/StoppedPlaying으로 센다.
+---
+ .../ui/framebudget/framebudget_policy.cc      | 17 +++++++++++--
+ .../ui/framebudget/framebudget_policy.h       | 12 ++++++++--
+ .../ui/framebudget/framebudget_tab_helper.cc  | 24 ++++++++++++++++++-
+ .../ui/framebudget/framebudget_tab_helper.h   |  6 +++++
+ .../browser/ui/framebudget/framebudget_ui.cc  | 15 ++++++++++++
+ 5 files changed, 69 insertions(+), 5 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index 8c5816253e..59c85259c3 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -28,6 +28,7 @@ constexpr char kLowResSwitch[] = "framebudget-low-res";
+ constexpr char kInactiveWindowFpsSwitch[] = "framebudget-inactive-window-fps";
+ constexpr char kBatteryDefaultFpsSwitch[] = "framebudget-battery-default-fps";
+ constexpr char kAssumeBatterySwitch[] = "framebudget-assume-battery";
++constexpr char kLiftDuringVideoSwitch[] = "framebudget-lift-during-video";
+ constexpr int kMaxFps = 240;
+ 
+ // Returns `value` as an FPS, or nullopt if it is not a number.
+@@ -88,6 +89,7 @@ CommandLineConfig::CommandLineConfig() {
+         ParseFps(command_line.GetSwitchValueASCII(kBatteryDefaultFpsSwitch));
+   }
+   assume_battery = command_line.HasSwitch(kAssumeBatterySwitch);
++  lift_during_video = command_line.HasSwitch(kLiftDuringVideoSwitch);
+ }
+ 
+ CommandLineConfig::~CommandLineConfig() = default;
+@@ -98,6 +100,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(kInputBoostPref, true);
+   registry->RegisterListPref(kNoInputBoostSitesPref);
+   registry->RegisterListPref(kLowResSitesPref);
++  registry->RegisterBooleanPref(kLiftDuringVideoPref, false);
+   registry->RegisterIntegerPref(kInactiveWindowFpsPref, 0);
+   registry->RegisterIntegerPref(kBatteryDefaultFpsPref, 0);
+ }
+@@ -164,9 +167,17 @@ Decision DecideIgnoringWindow(const PrefService& prefs,
+ Decision Decide(const PrefService& prefs,
+                 std::string_view host,
+                 std::optional<int> tab_override,
+-                bool window_active) {
++                bool window_active,
++                bool video_playing) {
+   Decision decision = DecideIgnoringWindow(prefs, host, tab_override);
+-  if (window_active || decision.source == Source::kTabOverride) {
++  if (decision.source == Source::kTabOverride) {
++    return decision;
++  }
++  if (video_playing && (GetCommandLineConfig().lift_during_video ||
++                        prefs.GetBoolean(kLiftDuringVideoPref))) {
++    return {0, Source::kVideoPlaying, ""};
++  }
++  if (window_active) {
+     return decision;
+   }
+   const int inactive = GetCommandLineConfig().inactive_window_fps.value_or(
+@@ -225,6 +236,8 @@ std::string_view SourceId(Source source) {
+       return "default";
+     case Source::kInactiveWindow:
+       return "inactive-window";
++    case Source::kVideoPlaying:
++      return "video-playing";
+   }
+ }
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 261bf108e6..d8b1756c82 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -39,6 +39,8 @@ inline constexpr char kNoInputBoostSitesPref[] =
+     "framebudget.no_input_boost_sites";
+ // List of hosts rendered at a lower resolution (kLowResScale).
+ inline constexpr char kLowResSitesPref[] = "framebudget.low_res_sites";
++// Whether a tab playing video runs without a limit.
++inline constexpr char kLiftDuringVideoPref[] = "framebudget.lift_during_video";
+ // shortcut: one fixed scale for every low-res site; make it a setting if users
+ // need to pick per site.
+ inline constexpr float kLowResScale = 0.5f;
+@@ -50,6 +52,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+ //   --framebudget-sites=youtube.com=60,example.com=15
+ //   --framebudget-no-input-boost=game.example,play.example
+ //   --framebudget-low-res=game.example,play.example
++//   --framebudget-lift-during-video
+ //   --framebudget-inactive-window-fps=10
+ //   --framebudget-battery-default-fps=20
+ //   --framebudget-assume-battery  (behave as if on battery, for testing)
+@@ -70,6 +73,7 @@ struct CommandLineConfig {
+   std::optional<int> inactive_window_fps;
+   std::optional<int> battery_default_fps;
+   bool assume_battery = false;
++  bool lift_during_video = false;
+ };
+ const CommandLineConfig& GetCommandLineConfig();
+ 
+@@ -83,6 +87,8 @@ enum class Source {
+   kSavedDefault,
+   // Lowers any of the above except kTabOverride while the window is inactive.
+   kInactiveWindow,
++  // No limit while the tab plays video, if enabled. Beats all but kTabOverride.
++  kVideoPlaying,
+ };
+ 
+ struct Decision {
+@@ -93,11 +99,13 @@ struct Decision {
+ };
+ 
+ // Decides the FPS for a tab showing `host`. `tab_override` is the tab's own
+-// override, if any. `window_active` is whether the tab's window is active.
++// override, if any. `window_active` is whether the tab's window is active, and
++// `video_playing` whether the tab is playing video.
+ Decision Decide(const PrefService& prefs,
+                 std::string_view host,
+                 std::optional<int> tab_override,
+-                bool window_active = true);
++                bool window_active = true,
++                bool video_playing = false);
+ 
+ // Whether the battery default applies now.
+ bool OnBattery();
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 767f0f5a93..6f7bcf5ac3 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -112,6 +112,8 @@ std::string DescribeSource(const framebudget::Decision& decision) {
+       return "배터리 사용 중 기본값";
+     case framebudget::Source::kInactiveWindow:
+       return "비활성 창";
++    case framebudget::Source::kVideoPlaying:
++      return "영상 재생 중";
+     case framebudget::Source::kCommandLineDefault:
+       return "실행 옵션 기본값";
+     case framebudget::Source::kSavedDefault:
+@@ -132,6 +134,7 @@ FrameBudgetTabHelper::FrameBudgetTabHelper(content::WebContents* web_contents)
+        {framebudget::kDefaultFpsPref, framebudget::kSitesPref,
+         framebudget::kInputBoostPref, framebudget::kNoInputBoostSitesPref,
+         framebudget::kInactiveWindowFpsPref, framebudget::kLowResSitesPref,
++        framebudget::kLiftDuringVideoPref,
+         framebudget::kBatteryDefaultFpsPref}) {
+     pref_change_registrar_.Add(
+         pref, base::BindRepeating(&FrameBudgetTabHelper::Apply,
+@@ -195,7 +198,7 @@ void FrameBudgetTabHelper::SaveAsSiteRule() {
+ 
+ framebudget::Decision FrameBudgetTabHelper::Decide() const {
+   return framebudget::Decide(*prefs(), host(), tab_override_fps_,
+-                             IsWindowActive());
++                             IsWindowActive(), playing_videos_ > 0);
+ }
+ 
+ std::string FrameBudgetTabHelper::host() const {
+@@ -269,6 +272,25 @@ void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
+   widget_observation_.Reset();
+ }
+ 
++void FrameBudgetTabHelper::MediaStartedPlaying(
++    const MediaPlayerInfo& video_type,
++    const content::MediaPlayerId& id) {
++  if (video_type.has_video) {
++    ++playing_videos_;
++    Apply();
++  }
++}
++
++void FrameBudgetTabHelper::MediaStoppedPlaying(
++    const MediaPlayerInfo& video_type,
++    const content::MediaPlayerId& id,
++    MediaStoppedReason reason) {
++  if (video_type.has_video && playing_videos_ > 0) {
++    --playing_videos_;
++    Apply();
++  }
++}
++
+ void FrameBudgetTabHelper::OnBatteryPowerStatusChange(
+     BatteryPowerStatus battery_power_status) {
+   Apply();
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 9bab40d1e3..255fd492a7 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -85,6 +85,11 @@ class FrameBudgetTabHelper
+   void PrimaryPageChanged(content::Page& page) override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
++  void MediaStartedPlaying(const MediaPlayerInfo& video_type,
++                           const content::MediaPlayerId& id) override;
++  void MediaStoppedPlaying(const MediaPlayerInfo& video_type,
++                           const content::MediaPlayerId& id,
++                           MediaStoppedReason reason) override;
+   void WebContentsDestroyed() override;
+ 
+   // content::RenderWidgetHost::InputEventObserver:
+@@ -122,6 +127,7 @@ class FrameBudgetTabHelper
+   viz::FrameSinkId applied_frame_sink_id_;
+   base::TimeDelta applied_interval_;
+   bool applied_low_res_ = false;
++  int playing_videos_ = 0;
+   viz::FrameSinkId low_res_frame_sink_id_;
+ 
+   base::OneShotTimer boost_timer_;
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 0db25b3520..45a1685476 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -53,6 +53,7 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   <label>배터리 사용 중 규칙이 없는 사이트 <span id="battery"></span></label>
+   <p class="note" id="power-note"></p>
+   <label><input type="checkbox" id="boost"> 스크롤·입력 중에는 잠깐 제한 풀기</label>
++  <label><input type="checkbox" id="video"> 영상이 재생되는 탭은 제한 풀기</label>
+ </section>
+ 
+ <section>
+@@ -114,6 +115,7 @@ const SOURCE = {
+   'cmdline-default': '실행 옵션 기본값',
+   'battery-default': '배터리 사용 중 기본값',
+   'inactive-window': '비활성 창',
++  'video-playing': '영상 재생 중',
+   'default': '기본값',
+ };
+ 
+@@ -162,6 +164,7 @@ function render(state) {
+       '' :
+       `실행 옵션 --framebudget-default-fps=${state.commandLineDefaultFps} 이 우선 적용되고 있습니다.`;
+   $('boost').checked = state.inputBoost;
++  $('video').checked = state.liftDuringVideo;
+   // 0은 '쓰지 않음'이라 기본 선택지의 '제한 없음' 대신 이름을 바꿔 보여 줍니다.
+   const offSelect = (value, msg) => {
+     const select = fpsSelect(value, (fps) => chrome.send(msg, [fps]));
+@@ -247,6 +250,7 @@ document.addEventListener('focusout', () => {
+   if (latest) setTimeout(() => window.framebudget.onState(latest));
+ });
+ $('boost').onchange = () => chrome.send('setInputBoost', [$('boost').checked]);
++$('video').onchange = () => chrome.send('setLiftDuringVideo', [$('video').checked]);
+ $('add-site').onsubmit = (event) => {
+   event.preventDefault();
+   chrome.send('setSiteRule', [$('new-host').value, newFps]);
+@@ -296,6 +300,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     Register("getState", &FrameBudgetHandler::HandleGetState);
+     Register("setDefaultFps", &FrameBudgetHandler::HandleSetDefaultFps);
+     Register("setInputBoost", &FrameBudgetHandler::HandleSetInputBoost);
++    Register("setLiftDuringVideo",
++             &FrameBudgetHandler::HandleSetLiftDuringVideo);
+     Register("setInactiveWindowFps",
+              &FrameBudgetHandler::HandleSetInactiveWindowFps);
+     Register("setBatteryDefaultFps",
+@@ -357,6 +363,13 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     SetFpsPref(framebudget::kBatteryDefaultFpsPref, args);
+   }
+ 
++  void HandleSetLiftDuringVideo(const base::ListValue& args) {
++    if (args.size() == 1 && args[0].is_bool()) {
++      prefs()->SetBoolean(framebudget::kLiftDuringVideoPref, args[0].GetBool());
++    }
++    SendState();
++  }
++
+   void HandleSetInputBoost(const base::ListValue& args) {
+     if (args.size() == 1 && args[0].is_bool()) {
+       prefs()->SetBoolean(framebudget::kInputBoostPref, args[0].GetBool());
+@@ -457,6 +470,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     state.Set("batteryDefaultFps",
+               prefs()->GetInteger(framebudget::kBatteryDefaultFpsPref));
+     state.Set("onBattery", framebudget::OnBattery());
++    state.Set("liftDuringVideo",
++              prefs()->GetBoolean(framebudget::kLiftDuringVideoPref));
+ 
+     const base::ListValue& no_boost =
+         prefs()->GetList(framebudget::kNoInputBoostSitesPref);
+-- 
+2.53.0
+

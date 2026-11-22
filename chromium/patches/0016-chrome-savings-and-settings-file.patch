@@ -1,0 +1,364 @@
+From 4f37cc986dab7f5e90e028de5ecaa82d7ccfa4d4 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 02:23:35 +0900
+Subject: [PATCH] =?UTF-8?q?chrome:=20=ED=83=AD=EB=B3=84=20=EC=A0=88?=
+ =?UTF-8?q?=EC=95=BD=EB=9F=89=20=EC=B6=94=EC=A0=95=20=ED=91=9C=EC=8B=9C,?=
+ =?UTF-8?q?=20=EC=84=A4=EC=A0=95=20=EB=82=B4=EB=B3=B4=EB=82=B4=EA=B8=B0?=
+ =?UTF-8?q?=C2=B7=EA=B0=80=EC=A0=B8=EC=98=A4=EA=B8=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 탭마다 화면에 보이며 제한된 시간과 (화면 주사율 - 제한 FPS) x 시간으로 추정한
+  덜 그린 프레임 수를 세서 chrome://framebudget에 보여 준다.
+- 모든 설정을 JSON으로 내보내고 불러온다. 불러올 때 FPS는 0~240으로 자르고
+  주소는 화면에서 고칠 때와 같이 정리하며, 모르는 키는 무시한다.
+---
+ chrome/browser/ui/framebudget/BUILD.gn        |   1 +
+ .../ui/framebudget/framebudget_tab_helper.cc  |  40 +++++
+ .../ui/framebudget/framebudget_tab_helper.h   |  16 ++
+ .../browser/ui/framebudget/framebudget_ui.cc  | 143 +++++++++++++++++-
+ 4 files changed, 198 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index 48594ff671..632628927f 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -38,6 +38,7 @@ source_set("framebudget") {
+     "//components/tabs:public",
+     "//components/user_prefs",
+     "//third_party/blink/public/common:headers",
++    "//ui/display",
+     "//ui/events:events_base",
+     "//url",
+   ]
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index 6f7bcf5ac3..f18dee9987 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <string>
+ #include <utility>
+@@ -27,6 +28,8 @@
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "third_party/blink/public/common/input/web_keyboard_event.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "url/gurl.h"
+ 
+@@ -291,6 +294,42 @@ void FrameBudgetTabHelper::MediaStoppedPlaying(
+   }
+ }
+ 
++void FrameBudgetTabHelper::OnVisibilityChanged(content::Visibility visibility) {
++  AccountSavings(current_fps_);
++}
++
++void FrameBudgetTabHelper::AccountSavings(int fps) {
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (current_fps_ > 0 && !segment_start_.is_null()) {
++    float refresh = display::Screen::Get()
++                        ->GetDisplayNearestView(web_contents()->GetNativeView())
++                        .display_frequency();
++    if (refresh <= 0) {
++      refresh = 60;
++    }
++    const base::TimeDelta elapsed = now - segment_start_;
++    limited_time_ += elapsed;
++    saved_frames_ +=
++        elapsed.InSecondsF() * std::max(0.0f, refresh - current_fps_);
++  }
++  current_fps_ = fps;
++  // Hidden tabs do not draw at all, so only visible time counts.
++  segment_start_ =
++      web_contents()->GetVisibility() == content::Visibility::VISIBLE
++          ? now
++          : base::TimeTicks();
++}
++
++double FrameBudgetTabHelper::SavedFrames() {
++  AccountSavings(current_fps_);
++  return saved_frames_;
++}
++
++base::TimeDelta FrameBudgetTabHelper::LimitedTime() {
++  AccountSavings(current_fps_);
++  return limited_time_;
++}
++
+ void FrameBudgetTabHelper::OnBatteryPowerStatusChange(
+     BatteryPowerStatus battery_power_status) {
+   Apply();
+@@ -368,6 +407,7 @@ void FrameBudgetTabHelper::Apply() {
+     applied_low_res_ = low_res;
+   }
+   const int fps = boosted_ ? 0 : Decide().fps;
++  AccountSavings(fps);
+   const base::TimeDelta interval =
+       fps > 0 ? base::Hertz(fps) : base::TimeDelta();
+   if (frame_sink_id == applied_frame_sink_id_ &&
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 255fd492a7..f73f6674bd 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -71,6 +71,13 @@ class FrameBudgetTabHelper
+   int id() const { return id_; }
+   std::optional<int> tab_override() const { return tab_override_fps_; }
+   bool boosted() const { return boosted_; }
++
++  // Estimated frames not drawn thanks to the limit, and how long the tab was
++  // limited while visible. Estimate: (refresh rate - limit) x time limited.
++  // A page that draws less than the refresh rate anyway saves less, so this
++  // is an upper bound.
++  double SavedFrames();
++  base::TimeDelta LimitedTime();
+   std::string host() const;
+ 
+  private:
+@@ -85,6 +92,7 @@ class FrameBudgetTabHelper
+   void PrimaryPageChanged(content::Page& page) override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
++  void OnVisibilityChanged(content::Visibility visibility) override;
+   void MediaStartedPlaying(const MediaPlayerInfo& video_type,
+                            const content::MediaPlayerId& id) override;
+   void MediaStoppedPlaying(const MediaPlayerInfo& video_type,
+@@ -110,6 +118,10 @@ class FrameBudgetTabHelper
+   void OnWindowActivationChanged(BrowserWindowInterface* window);
+   bool IsWindowActive() const;
+ 
++  // Adds the segment since the last call to the savings, then starts a new
++  // one at `fps` (0 = not limited).
++  void AccountSavings(int fps);
++
+   // Sends the tab's limit to viz when its frame sink or FPS has changed.
+   void Apply();
+ 
+@@ -128,6 +140,10 @@ class FrameBudgetTabHelper
+   base::TimeDelta applied_interval_;
+   bool applied_low_res_ = false;
+   int playing_videos_ = 0;
++  int current_fps_ = 0;
++  base::TimeTicks segment_start_;
++  double saved_frames_ = 0;
++  base::TimeDelta limited_time_;
+   viz::FrameSinkId low_res_frame_sink_id_;
+ 
+   base::OneShotTimer boost_timer_;
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 45a1685476..ff60f5869a 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -10,6 +10,9 @@
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/memory/ref_counted_memory.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/values.h"
+@@ -77,9 +80,18 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   <h2>열린 탭</h2>
+   <p class="note">Alt+Shift+F로 현재 탭의 FPS를 바로 바꿀 수 있습니다.</p>
+   <table>
+-    <thead><tr><th>탭</th><th>지금</th><th>적용 이유</th><th>이 탭만</th><th></th></tr></thead>
++    <thead><tr><th>탭</th><th>지금</th><th>적용 이유</th><th>덜 그린 프레임(추정)</th><th>이 탭만</th><th></th></tr></thead>
+     <tbody id="tabs"></tbody>
+   </table>
++  <p class="note" id="savings"></p>
++</section>
++
++<section>
++  <h2>설정 파일</h2>
++  <p class="note">사이트 규칙과 모든 설정을 JSON 파일로 저장하거나 불러옵니다.</p>
++  <button type="button" id="export">내보내기</button>
++  <label>가져오기 <input type="file" id="import" accept=".json,application/json"></label>
++  <p class="note" id="import-result"></p>
+ </section>
+ </body>
+ </html>
+@@ -227,16 +239,36 @@ function render(state) {
+         tab.hasOverride ? tab.fps : -1,
+         (fps) => chrome.send('setTabOverride', [tab.id, fps]),
+         [[-1, '규칙 따름']]);
++    const saved = el('span', `${Math.round(tab.savedFrames).toLocaleString()}프레임`);
++    if (tab.limitedSeconds > 0) {
++      const sec = Math.round(tab.limitedSeconds);
++      const time = el('span', ` · ${sec < 60 ? sec + '초' : Math.round(sec / 60) + '분'} 제한`);
++      time.className = 'host';
++      saved.append(time);
++    }
+     const save = button('이 사이트 규칙으로 저장',
+         () => chrome.send('saveTabAsSiteRule', [tab.id]));
+     save.disabled = !tab.host;
+-    const tr = row(titleCell, now, reason, override, save);
++    const tr = row(titleCell, now, reason, saved, override, save);
+     tr.firstChild.className = 'title';
+     return tr;
+   }));
++  const total = state.tabs.reduce((sum, tab) => sum + tab.savedFrames, 0);
++  $('savings').textContent = `열린 탭 합계 약 ${Math.round(total).toLocaleString()}프레임을 덜 그렸습니다. ` +
++      '(화면 주사율 − 제한 FPS) × 화면에 보이며 제한된 시간으로 추정한 최댓값입니다. 원래 주사율보다 적게 그리던 페이지는 실제로는 덜 줄어듭니다.';
+ }
+ 
+ window.framebudget = {
++  onExport(json) {
++    const link = el('a');
++    link.href = URL.createObjectURL(new Blob([json], {type: 'application/json'}));
++    link.download = 'framebudget-settings.json';
++    link.click();
++    URL.revokeObjectURL(link.href);
++  },
++  onImportResult(message) {
++    $('import-result').textContent = message;
++  },
+   onState(state) {
+     latest = state;
+     // Re-rendering replaces the controls, so wait while the user is using one.
+@@ -251,6 +283,12 @@ document.addEventListener('focusout', () => {
+ });
+ $('boost').onchange = () => chrome.send('setInputBoost', [$('boost').checked]);
+ $('video').onchange = () => chrome.send('setLiftDuringVideo', [$('video').checked]);
++$('export').onclick = () => chrome.send('exportSettings');
++$('import').onchange = async () => {
++  const file = $('import').files[0];
++  if (file) chrome.send('importSettings', [await file.text()]);
++  $('import').value = '';
++};
+ $('add-site').onsubmit = (event) => {
+   event.preventDefault();
+   chrome.send('setSiteRule', [$('new-host').value, newFps]);
+@@ -313,6 +351,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     Register("setSiteLowRes", &FrameBudgetHandler::HandleSetSiteLowRes);
+     Register("setTabOverride", &FrameBudgetHandler::HandleSetTabOverride);
+     Register("saveTabAsSiteRule", &FrameBudgetHandler::HandleSaveTabAsSiteRule);
++    Register("exportSettings", &FrameBudgetHandler::HandleExportSettings);
++    Register("importSettings", &FrameBudgetHandler::HandleImportSettings);
+   }
+ 
+  private:
+@@ -450,6 +490,103 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+     SendState();
+   }
+ 
++  // Every setting, keyed by its pref name without the "framebudget." prefix.
++  void HandleExportSettings(const base::ListValue& args) {
++    base::DictValue out;
++    out.Set("version", 1);
++    for (const char* pref : kIntPrefs) {
++      out.Set(Key(pref), prefs()->GetInteger(pref));
++    }
++    for (const char* pref : kBoolPrefs) {
++      out.Set(Key(pref), prefs()->GetBoolean(pref));
++    }
++    for (const char* pref : kListPrefs) {
++      out.Set(Key(pref), prefs()->GetList(pref).Clone());
++    }
++    out.Set(Key(framebudget::kSitesPref),
++            prefs()->GetDict(framebudget::kSitesPref).Clone());
++    AllowJavascript();
++    CallJavascriptFunction(
++        "framebudget.onExport",
++        base::Value(base::WriteJsonWithOptions(
++                        out, base::JSONWriter::OPTIONS_PRETTY_PRINT)
++                        .value_or("{}")));
++  }
++
++  // Applies the keys it recognises and ignores the rest. Values are clamped
++  // and hosts normalised the same way as edits on this page.
++  void HandleImportSettings(const base::ListValue& args) {
++    std::optional<base::DictValue> in =
++        args.size() == 1 && args[0].is_string()
++            ? base::JSONReader::ReadDict(args[0].GetString(),
++                                         base::JSON_PARSE_CHROMIUM_EXTENSIONS)
++            : std::nullopt;
++    AllowJavascript();
++    if (!in) {
++      CallJavascriptFunction("framebudget.onImportResult",
++                             base::Value("JSON 파일을 읽지 못했습니다."));
++      return;
++    }
++    int applied = 0;
++    for (const char* pref : kIntPrefs) {
++      if (std::optional<int> v = in->FindInt(Key(pref))) {
++        prefs()->SetInteger(pref, framebudget::ClampFps(*v));
++        ++applied;
++      }
++    }
++    for (const char* pref : kBoolPrefs) {
++      if (std::optional<bool> v = in->FindBool(Key(pref))) {
++        prefs()->SetBoolean(pref, *v);
++        ++applied;
++      }
++    }
++    for (const char* pref : kListPrefs) {
++      if (const base::ListValue* list = in->FindList(Key(pref))) {
++        base::ListValue hosts;
++        for (const base::Value& v : *list) {
++          if (std::string host = v.is_string()
++                                     ? framebudget::NormalizeHost(v.GetString())
++                                     : std::string();
++              !host.empty() && !hosts.contains(host)) {
++            hosts.Append(std::move(host));
++          }
++        }
++        prefs()->SetList(pref, std::move(hosts));
++        ++applied;
++      }
++    }
++    if (const base::DictValue* sites =
++            in->FindDict(Key(framebudget::kSitesPref))) {
++      base::DictValue clean;
++      for (const auto [host, value] : *sites) {
++        const std::string normalized = framebudget::NormalizeHost(host);
++        if (std::optional<int> fps = value.GetIfInt(); fps && !normalized.empty()) {
++          clean.Set(normalized, framebudget::ClampFps(*fps));
++        }
++      }
++      prefs()->SetDict(framebudget::kSitesPref, std::move(clean));
++      ++applied;
++    }
++    CallJavascriptFunction(
++        "framebudget.onImportResult",
++        base::Value(applied ? "설정 " + base::NumberToString(applied) +
++                                  "개 항목을 불러왔습니다."
++                            : std::string("불러올 FrameBudget 설정이 없습니다.")));
++    SendState();
++  }
++
++  static std::string Key(std::string_view pref) {
++    return std::string(pref.substr(pref.find('.') + 1));
++  }
++
++  static constexpr const char* kIntPrefs[] = {
++      framebudget::kDefaultFpsPref, framebudget::kInactiveWindowFpsPref,
++      framebudget::kBatteryDefaultFpsPref};
++  static constexpr const char* kBoolPrefs[] = {
++      framebudget::kInputBoostPref, framebudget::kLiftDuringVideoPref};
++  static constexpr const char* kListPrefs[] = {
++      framebudget::kNoInputBoostSitesPref, framebudget::kLowResSitesPref};
++
+   void SendState() {
+     AllowJavascript();
+     CallJavascriptFunction("framebudget.onState", base::Value(BuildState()));
+@@ -528,6 +665,8 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+       tab.Set("rule", decision.rule);
+       tab.Set("boosted", helper->boosted());
+       tab.Set("hasOverride", helper->tab_override().has_value());
++      tab.Set("savedFrames", helper->SavedFrames());
++      tab.Set("limitedSeconds", helper->LimitedTime().InSecondsF());
+       tabs.Append(std::move(tab));
+     }
+     state.Set("tabs", std::move(tabs));
+-- 
+2.53.0
+

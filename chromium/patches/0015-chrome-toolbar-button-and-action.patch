@@ -1,0 +1,129 @@
+From 61455fe5e9b8b7a0b5a8f5ec26d974a2490a2287 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 02:23:35 +0900
+Subject: [PATCH 1/2] =?UTF-8?q?chrome:=20FrameBudget=20=ED=88=B4=EB=B0=94?=
+ =?UTF-8?q?=20=EB=B2=84=ED=8A=BC,=20=EB=AA=85=EB=A0=B9=EC=9D=84=20?=
+ =?UTF-8?q?=EC=95=A1=EC=85=98=20=ED=91=9C=EC=97=90=20=EC=A0=95=EC=8B=9D=20?=
+ =?UTF-8?q?=EB=93=B1=EB=A1=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+IDC_FRAMEBUDGET_CYCLE_TAB_FPS를 kActionFrameBudget으로 액션 표에 등록하고,
+누르면 현재 탭의 FPS를 바꾸는 고정 가능한 툴바 버튼을 만든다. 새 프로필에서는
+기본으로 고정한다. 명령이 액션 체계로 실행되므로 0008에서 BrowserView에
+넣은 단축키 우회 코드를 지운다.
+---
+ chrome/browser/ui/actions/chrome_action_id.h  |  1 +
+ chrome/browser/ui/browser_actions.cc          | 27 +++++++++++++++++++
+ .../browser/ui/toolbar/toolbar_pref_names.cc  |  6 +++++
+ chrome/browser/ui/views/frame/browser_view.cc | 12 ---------
+ 4 files changed, 34 insertions(+), 12 deletions(-)
+
+diff --git a/chrome/browser/ui/actions/chrome_action_id.h b/chrome/browser/ui/actions/chrome_action_id.h
+index 49f05998da..71e0551898 100644
+--- a/chrome/browser/ui/actions/chrome_action_id.h
++++ b/chrome/browser/ui/actions/chrome_action_id.h
+@@ -543,6 +543,7 @@
+   E(kActionTaskManagerContextMenu, IDC_TASK_MANAGER_CONTEXT_MENU) \
+   E(kActionTaskManagerMainMenu, IDC_TASK_MANAGER_MAIN_MENU) \
+   E(kActionDevTools, IDC_DEV_TOOLS) \
++  E(kActionFrameBudget, IDC_FRAMEBUDGET_CYCLE_TAB_FPS) \
+   E(kActionShowChromeLabs, IDC_SHOW_CHROME_LABS) \
+   E(kActionSaveCreditCardForPage, IDC_SAVE_CREDIT_CARD_FOR_PAGE) \
+   E(kActionSaveIbanForPage, IDC_SAVE_IBAN_FOR_PAGE) \
+diff --git a/chrome/browser/ui/browser_actions.cc b/chrome/browser/ui/browser_actions.cc
+index 0f7a326019..c192de81f8 100644
+--- a/chrome/browser/ui/browser_actions.cc
++++ b/chrome/browser/ui/browser_actions.cc
+@@ -22,6 +22,7 @@
+ #include "build/branding_buildflags.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/app/vector_icons/vector_icons.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ #include "chrome/browser/browsing_data/browsing_data_important_sites_util.h"
+ #include "chrome/browser/contextual_cueing/contextual_cueing_controller.h"
+ #include "chrome/browser/contextual_cueing/features.h"
+@@ -1610,6 +1611,32 @@ void BrowserActions::InitializeChromeMenuActions() {
+ 
+   // TODO(crbug.com/435220196): Ideally this action would have
+   // ChromeLabsCoordinator passed in as a dependency directly.
++  // FrameBudget: cycles the active tab's FPS, like Alt+Shift+F.
++  root_action_item_->AddChild(
++      actions::ActionItem::Builder(base::BindRepeating(
++                                       [](BrowserWindowInterface* bwi,
++                                          actions::ActionItem* item,
++                                          actions::ActionInvocationContext) {
++                                         tabs::TabInterface* tab =
++                                             bwi->GetActiveTabInterface();
++                                         if (auto* helper =
++                                                 tab ? FrameBudgetTabHelper::
++                                                           FromWebContents(
++                                                               tab->GetContents())
++                                                     : nullptr) {
++                                           helper->CycleTabOverride();
++                                         }
++                                       },
++                                       bwi))
++          .SetActionId(kActionFrameBudget)
++          .SetText(u"FrameBudget")
++          .SetTooltipText(u"이 탭의 FPS 바꾸기 (Alt+Shift+F)")
++          .SetImage(ui::ImageModel::FromVectorIcon(kSpeedIcon, ui::kColorIcon))
++          .SetProperty(actions::kActionItemPinnableKey,
++                       std::underlying_type_t<actions::ActionPinnableState>(
++                           actions::ActionPinnableState::kPinnable))
++          .Build());
++
+   if (IsChromeLabsEnabled() && !web_app::AppBrowserController::IsWebApp(bwi)) {
+     root_action_item_->AddChild(
+         ChromeMenuAction(
+diff --git a/chrome/browser/ui/toolbar/toolbar_pref_names.cc b/chrome/browser/ui/toolbar/toolbar_pref_names.cc
+index f94f1a9c0c..dc9f44e685 100644
+--- a/chrome/browser/ui/toolbar/toolbar_pref_names.cc
++++ b/chrome/browser/ui/toolbar/toolbar_pref_names.cc
+@@ -23,6 +23,12 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
+   if (chrome_labs_action.has_value()) {
+     default_pinned_actions.Append(chrome_labs_action.value());
+   }
++  // FrameBudget: show the FPS button by default.
++  if (const std::optional<std::string>& framebudget_action =
++          actions::ActionIdMap::ActionIdToString(kActionFrameBudget);
++      framebudget_action.has_value()) {
++    default_pinned_actions.Append(framebudget_action.value());
++  }
+ 
+   if (base::FeatureList::IsEnabled(
+           features::kTabsFromOtherDevicesSidePanelPinnedByDefault)) {
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index d916437dd5..b68f089aeb 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -99,7 +99,6 @@
+ #include "chrome/browser/ui/exclusive_access/fullscreen_tab_params.h"
+ #include "chrome/browser/ui/find_bar/find_bar.h"
+ #include "chrome/browser/ui/focus/browser_focus_controller.h"
+-#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
+ #include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+ #include "chrome/browser/ui/global_error/global_error.h"
+ #include "chrome/browser/ui/global_error/global_error_service.h"
+@@ -5264,17 +5263,6 @@ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
+ 
+   UpdateAcceleratorMetrics(accelerator, command_id);
+ 
+-  // FrameBudget has no action item, so the actions-based command updater
+-  // would drop it. Handle the shortcut directly.
+-  if (command_id == IDC_FRAMEBUDGET_CYCLE_TAB_FPS) {
+-    if (content::WebContents* contents = GetActiveWebContents()) {
+-      if (auto* helper = FrameBudgetTabHelper::FromWebContents(contents)) {
+-        helper->CycleTabOverride();
+-      }
+-    }
+-    return true;
+-  }
+-
+   if (command_id == IDC_CLEAR_BROWSING_DATA) {
+     views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
+         browsing_data_important_sites_util::
+-- 
+2.53.0
+

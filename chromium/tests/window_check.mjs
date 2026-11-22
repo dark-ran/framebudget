@@ -84,7 +84,7 @@ async function attach(b, targetId, slot) {
   const page = {
     targetId, slot,
     eval: async (expr, userGesture = false) =>
-      (await s('Runtime.evaluate', {expression: expr, returnByValue: true, userGesture})).result.value,
+      (await s('Runtime.evaluate', {expression: expr, returnByValue: true, userGesture, awaitPromise: true})).result.value,
     goto: async url => { await s('Page.navigate', {url}); await sleep(2000); },
     reload: async () => { await s('Page.reload'); await sleep(2000); },
     // Page.crash는 렌더러가 죽어서 응답이 오지 않으므로 기다리지 않습니다.
@@ -245,6 +245,18 @@ function check(name, ok, data) {
       check('8. 전체 입력 시 해제를 끄면 키 입력 중에도 30', near(r4, 30) && Math.max(...r4) <= 31, r4);
     }
     const state = await ui.eval(`(() => [...document.querySelectorAll('#tabs tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ')))()`);
+    const savedRow = state.find(t => t.includes('raf')) || '';
+    const savedFrames = Number((savedRow.match(/([\d,]+)프레임/) || [, '0'])[1].replace(/,/g, ''));
+    check('13. 절약량: 제한된 탭의 덜 그린 프레임이 0보다 큼', savedFrames > 0, savedFrames);
+    const exportJson = () => ui.eval(`new Promise(r => { framebudget.onExport = r; chrome.send('exportSettings'); })`);
+    const exported = JSON.parse(await exportJson());
+    check('14. 내보내기: 기본값 30이 들어 있음', exported.default_fps === 30, exported.default_fps);
+    await ui.eval(`chrome.send('importSettings', [${JSON.stringify(JSON.stringify({default_fps: 5, sites: {'Example.COM/x': 20}, low_res_sites: ['https://A.com/p', 'a.com']}))}])`);
+    await sleep(1000);
+    const imported = JSON.parse(await exportJson());
+    check('14. 가져오기: 기본값 5, 주소는 정리되어 example.com=20, 저해상도 a.com 하나',
+          imported.default_fps === 5 && imported.sites['example.com'] === 20 &&
+          JSON.stringify(imported.low_res_sites) === '["a.com"]', imported);
     check('8. 설정 화면의 열린 탭 표에 raf 탭이 30 FPS 기본값으로 표시', state.some(t => t.includes('raf') && t.includes('30 FPS') && t.includes('기본값')), state);
   } finally {
     await b.close();

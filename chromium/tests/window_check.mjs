@@ -89,6 +89,8 @@ async function attach(b, targetId, slot) {
     reload: async () => { await s('Page.reload'); await sleep(2000); },
     // Page.crash는 렌더러가 죽어서 응답이 오지 않으므로 기다리지 않습니다.
     crash: () => { s('Page.crash').catch(() => {}); },
+    // CDP로 마우스 이동을 보냅니다(실제 마우스는 쓰지 않습니다).
+    mouseMove: () => s('Input.dispatchMouseEvent', {type: 'mouseMoved', x: 100 + Math.random() * 50, y: 100}),
     // 창 가운데를 눌러 키 입력을 받게 합니다. 클릭도 입력이라 잠시 기다립니다.
     focus: async () => { xdo('mousemove', String(slot * (WIDTH + 20) + WIDTH / 2), '450', 'click', '1'); await sleep(1500); },
     // sec초 동안 초당 rAF 수. key를 주면 그동안 그 키를 계속 누릅니다.
@@ -332,6 +334,28 @@ function check(name, ok, data) {
     await sleep(1500);
     const paused = await pa.raf(2);
     check('12. 영상을 멈추면 다시 15', near(paused, 15), paused);
+  } finally {
+    await b.close();
+  }
+}
+
+// ---- 6회차: 입력이 없는 탭 ----
+{
+  const b = await launch(['--framebudget-idle-fps=10', '--framebudget-idle-seconds=3']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    await pa.mouseMove();
+    const active = await pa.raf(1);
+    check('16. 입력 직후: 제한 없음(≥ 55)', median(active) >= 55, active);
+    await sleep(3500);
+    const idle = await pa.raf(2);
+    check('16. 3초 넘게 입력 없음: 10', near(idle, 10), idle);
+    await pa.mouseMove();
+    await sleep(300);
+    const back = await pa.raf(2);
+    check('16. 마우스를 움직이면 다시 제한 없음(≥ 55)', median(back) >= 55, back);
   } finally {
     await b.close();
   }

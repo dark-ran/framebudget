@@ -227,9 +227,14 @@ function check(name, ok, data) {
 
     const r0 = await pa.raf(2);
     check('8. 규칙 없음: 제한 없음(≥ 55)', median(r0) >= 55, r0);
-    await sendUi('setSiteRule', ['127.0.0.1', 15]);
+    // 규칙 없이 계속 그리는 탭에는 추천이 뜨고, 추천 버튼으로 규칙을 만들 수 있습니다.
+    await sleep(3000);
+    const rec = await ui.eval(`document.getElementById('recommend').innerText`);
+    check('15. 자동 추천: 규칙 없이 계속 그리는 127.0.0.1을 추천', rec.includes('127.0.0.1'), rec);
+    await ui.eval(`[...document.querySelectorAll('#recommend button')].find(b => b.textContent.startsWith('15FPS')).click()`);
+    await sleep(1500);
     const r1 = await pa.raf(2);
-    check('8. 설정 화면에서 127.0.0.1=15 추가 → 열린 탭에 바로 15', near(r1, 15), r1);
+    check('8. 추천 버튼으로 127.0.0.1=15 추가 → 열린 탭에 바로 15', near(r1, 15), r1);
     await sendUi('setDefaultFps', [30]);
     await pa.goto(`${B}/raf.html`);
     const r2 = await pa.raf(2);
@@ -246,8 +251,9 @@ function check(name, ok, data) {
     }
     const state = await ui.eval(`(() => [...document.querySelectorAll('#tabs tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ')))()`);
     const savedRow = state.find(t => t.includes('raf')) || '';
-    const savedFrames = Number((savedRow.match(/([\d,]+)프레임/) || [, '0'])[1].replace(/,/g, ''));
-    check('13. 절약량: 제한된 탭의 덜 그린 프레임이 0보다 큼', savedFrames > 0, savedFrames);
+    const [, drawnText = '0', skippedText = '0'] = savedRow.match(/([\d,]+) \/ ([\d,]+)/) || [];
+    const drawn = Number(drawnText.replace(/,/g, '')), skipped = Number(skippedText.replace(/,/g, ''));
+    check('13. 측정: 제한된 탭은 그린 프레임과 제한으로 건너뛴 프레임이 모두 0보다 큼', drawn > 0 && skipped > 0, {drawn, skipped});
     const exportJson = () => ui.eval(`new Promise(r => { framebudget.onExport = r; chrome.send('exportSettings'); })`);
     const exported = JSON.parse(await exportJson());
     check('14. 내보내기: 기본값 30이 들어 있음', exported.default_fps === 30, exported.default_fps);

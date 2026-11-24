@@ -1,0 +1,490 @@
+From b86c64ae2cdf8deee8b2bc22b9963d7dcb0a329a Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 22:19:57 +0900
+Subject: [PATCH] =?UTF-8?q?viz=C2=B7content=C2=B7chrome:=20=ED=94=84?=
+ =?UTF-8?q?=EB=A0=88=EC=9E=84=20=EC=88=98=EB=A5=BC=20=EC=8B=A4=EC=A0=9C?=
+ =?UTF-8?q?=EB=A1=9C=20=EC=84=B8=EA=B3=A0,=20=EA=B3=84=EC=86=8D=20?=
+ =?UTF-8?q?=EA=B7=B8=EB=A6=AC=EB=8A=94=20=ED=83=AD=EC=97=90=20=EC=A0=9C?=
+ =?UTF-8?q?=ED=95=9C=20=EC=B6=94=EC=B2=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- viz: 프레임 싱크마다 제출한 프레임과, 클라이언트가 원했지만 제한 때문에 보내지
+  않은 BeginFrame을 센다. FrameSinkManager.GetFrameBudgetStats로 하위 싱크까지
+  합쳐 돌려준다. content::GetFrameBudgetStats로 연다.
+- chrome://framebudget의 절약량을 추정((주사율-제한)x시간) 대신 이 측정값으로
+  바꾸고, 추정 코드를 지운다.
+- 규칙 없이 초당 30프레임 이상을 3초 넘게 그리는 탭에 30/15FPS 제한 추천을
+  띄운다.
+---
+ chrome/browser/ui/framebudget/BUILD.gn        |  1 -
+ .../ui/framebudget/framebudget_tab_helper.cc  | 48 +++++------------
+ .../ui/framebudget/framebudget_tab_helper.h   | 26 +++++-----
+ .../browser/ui/framebudget/framebudget_ui.cc  | 52 ++++++++++++++-----
+ .../viz/host/host_frame_sink_manager.cc       |  6 +++
+ components/viz/host/host_frame_sink_manager.h |  5 ++
+ .../compositor_frame_sink_support.cc          |  2 +
+ .../compositor_frame_sink_support.h           |  6 +++
+ .../frame_sinks/frame_sink_manager_impl.cc    | 14 +++++
+ .../frame_sinks/frame_sink_manager_impl.h     |  2 +
+ components/viz/test/test_frame_sink_manager.h |  4 ++
+ .../frame_rate_throttling.cc                  | 11 ++++
+ .../public/browser/frame_rate_throttling.h    |  9 ++++
+ .../compositing/frame_sink_manager.mojom      |  6 +++
+ 14 files changed, 130 insertions(+), 62 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index 632628927f..48594ff671 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -38,7 +38,6 @@ source_set("framebudget") {
+     "//components/tabs:public",
+     "//components/user_prefs",
+     "//third_party/blink/public/common:headers",
+-    "//ui/display",
+     "//ui/events:events_base",
+     "//url",
+   ]
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index f18dee9987..f54f6a78cb 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -28,8 +28,6 @@
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "third_party/blink/public/common/input/web_keyboard_event.h"
+-#include "ui/display/display.h"
+-#include "ui/display/screen.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "url/gurl.h"
+ 
+@@ -294,40 +292,23 @@ void FrameBudgetTabHelper::MediaStoppedPlaying(
+   }
+ }
+ 
+-void FrameBudgetTabHelper::OnVisibilityChanged(content::Visibility visibility) {
+-  AccountSavings(current_fps_);
+-}
+-
+-void FrameBudgetTabHelper::AccountSavings(int fps) {
+-  const base::TimeTicks now = base::TimeTicks::Now();
+-  if (current_fps_ > 0 && !segment_start_.is_null()) {
+-    float refresh = display::Screen::Get()
+-                        ->GetDisplayNearestView(web_contents()->GetNativeView())
+-                        .display_frequency();
+-    if (refresh <= 0) {
+-      refresh = 60;
+-    }
+-    const base::TimeDelta elapsed = now - segment_start_;
+-    limited_time_ += elapsed;
+-    saved_frames_ +=
+-        elapsed.InSecondsF() * std::max(0.0f, refresh - current_fps_);
++void FrameBudgetTabHelper::RequestStats() {
++  content::RenderWidgetHost* widget =
++      web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  if (!widget) {
++    return;
+   }
+-  current_fps_ = fps;
+-  // Hidden tabs do not draw at all, so only visible time counts.
+-  segment_start_ =
+-      web_contents()->GetVisibility() == content::Visibility::VISIBLE
+-          ? now
+-          : base::TimeTicks();
+-}
+-
+-double FrameBudgetTabHelper::SavedFrames() {
+-  AccountSavings(current_fps_);
+-  return saved_frames_;
++  content::GetFrameBudgetStats(
++      widget->GetFrameSinkId(),
++      base::BindOnce(&FrameBudgetTabHelper::OnStats,
++                     weak_factory_.GetWeakPtr()));
+ }
+ 
+-base::TimeDelta FrameBudgetTabHelper::LimitedTime() {
+-  AccountSavings(current_fps_);
+-  return limited_time_;
++// Counts belong to the page's frame sink, so a new page starts again at 0.
++void FrameBudgetTabHelper::OnStats(uint64_t drawn_frames,
++                                   uint64_t skipped_frames) {
++  drawn_frames_ = drawn_frames;
++  skipped_frames_ = skipped_frames;
+ }
+ 
+ void FrameBudgetTabHelper::OnBatteryPowerStatusChange(
+@@ -407,7 +388,6 @@ void FrameBudgetTabHelper::Apply() {
+     applied_low_res_ = low_res;
+   }
+   const int fps = boosted_ ? 0 : Decide().fps;
+-  AccountSavings(fps);
+   const base::TimeDelta interval =
+       fps > 0 ? base::Hertz(fps) : base::TimeDelta();
+   if (frame_sink_id == applied_frame_sink_id_ &&
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index f73f6674bd..65c44e90a8 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -13,6 +13,7 @@
+ #include "base/power_monitor/power_observer.h"
+ #include "base/scoped_observation.h"
+ #include "base/time/time.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/timer/timer.h"
+ #include "chrome/browser/ui/framebudget/framebudget_policy.h"
+ #include "components/prefs/pref_change_registrar.h"
+@@ -72,12 +73,12 @@ class FrameBudgetTabHelper
+   std::optional<int> tab_override() const { return tab_override_fps_; }
+   bool boosted() const { return boosted_; }
+ 
+-  // Estimated frames not drawn thanks to the limit, and how long the tab was
+-  // limited while visible. Estimate: (refresh rate - limit) x time limited.
+-  // A page that draws less than the refresh rate anyway saves less, so this
+-  // is an upper bound.
+-  double SavedFrames();
+-  base::TimeDelta LimitedTime();
++  // Frames the current page drew, and frames it asked for but did not get
++  // because of the limit, as last reported by viz. RequestStats() refreshes
++  // them asynchronously.
++  uint64_t drawn_frames() const { return drawn_frames_; }
++  uint64_t skipped_frames() const { return skipped_frames_; }
++  void RequestStats();
+   std::string host() const;
+ 
+  private:
+@@ -92,7 +93,6 @@ class FrameBudgetTabHelper
+   void PrimaryPageChanged(content::Page& page) override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
+-  void OnVisibilityChanged(content::Visibility visibility) override;
+   void MediaStartedPlaying(const MediaPlayerInfo& video_type,
+                            const content::MediaPlayerId& id) override;
+   void MediaStoppedPlaying(const MediaPlayerInfo& video_type,
+@@ -118,9 +118,7 @@ class FrameBudgetTabHelper
+   void OnWindowActivationChanged(BrowserWindowInterface* window);
+   bool IsWindowActive() const;
+ 
+-  // Adds the segment since the last call to the savings, then starts a new
+-  // one at `fps` (0 = not limited).
+-  void AccountSavings(int fps);
++  void OnStats(uint64_t drawn_frames, uint64_t skipped_frames);
+ 
+   // Sends the tab's limit to viz when its frame sink or FPS has changed.
+   void Apply();
+@@ -140,10 +138,8 @@ class FrameBudgetTabHelper
+   base::TimeDelta applied_interval_;
+   bool applied_low_res_ = false;
+   int playing_videos_ = 0;
+-  int current_fps_ = 0;
+-  base::TimeTicks segment_start_;
+-  double saved_frames_ = 0;
+-  base::TimeDelta limited_time_;
++  uint64_t drawn_frames_ = 0;
++  uint64_t skipped_frames_ = 0;
+   viz::FrameSinkId low_res_frame_sink_id_;
+ 
+   base::OneShotTimer boost_timer_;
+@@ -160,6 +156,8 @@ class FrameBudgetTabHelper
+   base::CallbackListSubscription window_inactive_subscription_;
+   SessionID observed_window_ = SessionID::InvalidValue();
+ 
++  base::WeakPtrFactory<FrameBudgetTabHelper> weak_factory_{this};
++
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index ff60f5869a..399244ac9c 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -76,11 +76,13 @@ constexpr char kHtml[] = R"HTML(<!doctype html>
+   "저해상도"를 켜면 그 사이트를 절반 해상도로 그린 뒤 늘려 보여 줍니다. 화면은 흐려지지만 그리는 픽셀이 1/4로 줄어듭니다.</p>
+ </section>
+ 
++<div id="recommend"></div>
++
+ <section>
+   <h2>열린 탭</h2>
+   <p class="note">Alt+Shift+F로 현재 탭의 FPS를 바로 바꿀 수 있습니다.</p>
+   <table>
+-    <thead><tr><th>탭</th><th>지금</th><th>적용 이유</th><th>덜 그린 프레임(추정)</th><th>이 탭만</th><th></th></tr></thead>
++    <thead><tr><th>탭</th><th>지금</th><th>적용 이유</th><th>그린 / 제한으로 건너뛴 프레임</th><th>이 탭만</th><th></th></tr></thead>
+     <tbody id="tabs"></tbody>
+   </table>
+   <p class="note" id="savings"></p>
+@@ -112,6 +114,7 @@ td.title { max-width: 360px; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
+ .host { color: var(--muted); font-size: 12px; }
+ .boost { color: #c60; font-size: 12px; margin-left: 6px; }
++.recommend { border: 1px solid #c60; border-radius: 6px; padding: 8px 12px; }
+ form { display: flex; gap: 8px; margin-top: 8px; }
+ label { display: block; margin: 6px 0; }
+ )CSS";
+@@ -239,13 +242,7 @@ function render(state) {
+         tab.hasOverride ? tab.fps : -1,
+         (fps) => chrome.send('setTabOverride', [tab.id, fps]),
+         [[-1, '규칙 따름']]);
+-    const saved = el('span', `${Math.round(tab.savedFrames).toLocaleString()}프레임`);
+-    if (tab.limitedSeconds > 0) {
+-      const sec = Math.round(tab.limitedSeconds);
+-      const time = el('span', ` · ${sec < 60 ? sec + '초' : Math.round(sec / 60) + '분'} 제한`);
+-      time.className = 'host';
+-      saved.append(time);
+-    }
++    const saved = el('span', `${tab.drawnFrames.toLocaleString()} / ${tab.skippedFrames.toLocaleString()}`);
+     const save = button('이 사이트 규칙으로 저장',
+         () => chrome.send('saveTabAsSiteRule', [tab.id]));
+     save.disabled = !tab.host;
+@@ -253,9 +250,36 @@ function render(state) {
+     tr.firstChild.className = 'title';
+     return tr;
+   }));
+-  const total = state.tabs.reduce((sum, tab) => sum + tab.savedFrames, 0);
+-  $('savings').textContent = `열린 탭 합계 약 ${Math.round(total).toLocaleString()}프레임을 덜 그렸습니다. ` +
+-      '(화면 주사율 − 제한 FPS) × 화면에 보이며 제한된 시간으로 추정한 최댓값입니다. 원래 주사율보다 적게 그리던 페이지는 실제로는 덜 줄어듭니다.';
++  const skipped = state.tabs.reduce((sum, tab) => sum + tab.skippedFrames, 0);
++  const drawn = state.tabs.reduce((sum, tab) => sum + tab.drawnFrames, 0);
++  $('savings').textContent = `열린 탭에서 ${drawn.toLocaleString()}프레임을 그렸고, ` +
++      `페이지가 원했지만 제한 때문에 그리지 않은 프레임이 ${skipped.toLocaleString()}개입니다. ` +
++      '화면 합성(viz)에서 센 값이며, 페이지를 새로 열면 0부터 다시 셉니다.';
++  renderRecommendations(state);
++}
++
++// Tabs without a limit that keep drawing many frames get a suggestion.
++const RECOMMEND_FPS = 30;
++const RECOMMEND_SECONDS = 3;
++const history = new Map();
++function renderRecommendations(state) {
++  const now = performance.now();
++  const box = $('recommend');
++  box.replaceChildren();
++  for (const tab of state.tabs) {
++    const prev = history.get(tab.id);
++    const rate = prev && tab.drawnFrames >= prev.drawn ?
++        (tab.drawnFrames - prev.drawn) / ((now - prev.time) / 1000) : 0;
++    const busy = tab.fps === 0 && !tab.hasOverride && !tab.boosted && tab.host &&
++        rate >= RECOMMEND_FPS ? (prev ? prev.busy : 0) + 1 : 0;
++    history.set(tab.id, {drawn: tab.drawnFrames, time: now, busy});
++    if (busy < RECOMMEND_SECONDS) continue;
++    const p = el('p', `추천: ${tab.host}이(가) 제한 없이 초당 약 ${Math.round(rate)}프레임을 계속 그리고 있습니다. `);
++    p.className = 'recommend';
++    p.append(button('30FPS로 제한', () => chrome.send('setSiteRule', [tab.host, 30])),
++             ' ', button('15FPS로 제한', () => chrome.send('setSiteRule', [tab.host, 15])));
++    box.append(p);
++  }
+ }
+ 
+ window.framebudget = {
+@@ -665,8 +689,10 @@ class FrameBudgetHandler : public content::WebUIMessageHandler {
+       tab.Set("rule", decision.rule);
+       tab.Set("boosted", helper->boosted());
+       tab.Set("hasOverride", helper->tab_override().has_value());
+-      tab.Set("savedFrames", helper->SavedFrames());
+-      tab.Set("limitedSeconds", helper->LimitedTime().InSecondsF());
++      // Shown on the next refresh; the page polls every second.
++      helper->RequestStats();
++      tab.Set("drawnFrames", static_cast<double>(helper->drawn_frames()));
++      tab.Set("skippedFrames", static_cast<double>(helper->skipped_frames()));
+       tabs.Append(std::move(tab));
+     }
+     state.Set("tabs", std::move(tabs));
+diff --git a/components/viz/host/host_frame_sink_manager.cc b/components/viz/host/host_frame_sink_manager.cc
+index 970a48890a..4d85305bc1 100644
+--- a/components/viz/host/host_frame_sink_manager.cc
++++ b/components/viz/host/host_frame_sink_manager.cc
+@@ -459,6 +459,12 @@ void HostFrameSinkManager::SetFrameBudgetInterval(
+   frame_sink_manager_->SetFrameBudgetInterval(frame_sink_id, interval);
+ }
+ 
++void HostFrameSinkManager::GetFrameBudgetStats(
++    const FrameSinkId& frame_sink_id,
++    base::OnceCallback<void(uint64_t, uint64_t)> callback) {
++  frame_sink_manager_->GetFrameBudgetStats(frame_sink_id, std::move(callback));
++}
++
+ void HostFrameSinkManager::AddHitTestRegionObserver(
+     HitTestRegionObserver* observer) {
+   observers_.AddObserver(observer);
+diff --git a/components/viz/host/host_frame_sink_manager.h b/components/viz/host/host_frame_sink_manager.h
+index f3ee7f4322..776fe0e53b 100644
+--- a/components/viz/host/host_frame_sink_manager.h
++++ b/components/viz/host/host_frame_sink_manager.h
+@@ -328,6 +328,11 @@ class VIZ_HOST_EXPORT HostFrameSinkManager
+   void StopThrottlingAllFrameSinks();
+   void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
+                               base::TimeDelta interval);
++  // FrameBudget: frames drawn and BeginFrames skipped by throttling for
++  // |frame_sink_id| and its descendants.
++  void GetFrameBudgetStats(
++      const FrameSinkId& frame_sink_id,
++      base::OnceCallback<void(uint64_t, uint64_t)> callback);
+ 
+   // HitTestDataProvider implementation.
+   void AddHitTestRegionObserver(HitTestRegionObserver* observer) override;
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+index 8ee28ff6fa..8f110fb260 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+@@ -1059,6 +1059,7 @@ SubmitResult CompositorFrameSinkSupport::MaybeSubmitCompositorFrame(
+     frame_sink_manager_->DidFinishFrame(frame_sink_id_, last_begin_frame_args_);
+   }
+ 
++  ++frame_budget_drawn_;
+   return SubmitResult::ACCEPTED;
+ }
+ 
+@@ -1600,6 +1601,7 @@ bool CompositorFrameSinkSupport::ShouldSendBeginFrame(
+ 
+   if (should_throttle_as_requested) {
+     ++frames_throttled_since_last_;
++    ++frame_budget_skipped_;
+     return RecordShouldSendBeginFrame("ThrottleRequested", false);
+   }
+ 
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.h b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+index 9de68fad96..b119cb77fd 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.h
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+@@ -179,6 +179,10 @@ class VIZ_SERVICE_EXPORT CompositorFrameSinkSupport
+   // 100 Hz display would otherwise give 33 FPS).
+   void SetThrottleIntervalIsCap(bool is_cap) { throttle_interval_is_cap_ = is_cap; }
+ 
++  // FrameBudget statistics since this frame sink was created.
++  uint64_t frame_budget_drawn_frames() const { return frame_budget_drawn_; }
++  uint64_t frame_budget_skipped_frames() const { return frame_budget_skipped_; }
++
+   // If other clients are interactive, reduce frame cadence if `throttled`.
+ 
+   // SurfaceClient implementation.
+@@ -539,6 +543,8 @@ class VIZ_SERVICE_EXPORT CompositorFrameSinkSupport
+ 
+   base::TimeTicks last_frame_time_;
+   bool throttle_interval_is_cap_ = false;
++  uint64_t frame_budget_drawn_ = 0;
++  uint64_t frame_budget_skipped_ = 0;
+ 
+   // Initialize |last_drawn_frame_index_| as though the frame before the first
+   // has been drawn.
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index 3dda7e2341..abb9a446a0 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -1326,6 +1326,20 @@ void FrameSinkManagerImpl::SetFrameBudgetInterval(
+   UpdateThrottling();
+ }
+ 
++void FrameSinkManagerImpl::GetFrameBudgetStats(
++    const FrameSinkId& frame_sink_id,
++    GetFrameBudgetStatsCallback callback) {
++  uint64_t drawn = 0;
++  uint64_t skipped = 0;
++  RecurseChildren(frame_sink_id, [this, &drawn, &skipped](const FrameSinkId& id) {
++    if (auto* support = GetFrameSinkForId(id)) {
++      drawn += support->frame_budget_drawn_frames();
++      skipped += support->frame_budget_skipped_frames();
++    }
++  });
++  std::move(callback).Run(drawn, skipped);
++}
++
+ void FrameSinkManagerImpl::ApplyThrottlingRules(
+     const base::flat_set<FrameSinkId>& throttled_roots,
+     const base::flat_map<FrameSinkId, base::TimeDelta>& budget_roots,
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.h b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+index 09502fc0bb..a92c0a1fda 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.h
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+@@ -207,6 +207,8 @@ class VIZ_SERVICE_EXPORT FrameSinkManagerImpl
+   void StopThrottlingAllFrameSinks() override;
+   void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
+                               base::TimeDelta interval) override;
++  void GetFrameBudgetStats(const FrameSinkId& frame_sink_id,
++                           GetFrameBudgetStatsCallback callback) override;
+   void ClearUnclaimedViewTransitionResources(
+       const blink::ViewTransitionToken& transition_token) override;
+   void CreateMetricsRecorderForTest(
+diff --git a/components/viz/test/test_frame_sink_manager.h b/components/viz/test/test_frame_sink_manager.h
+index 1a7bae28ac..ad6c719a83 100644
+--- a/components/viz/test/test_frame_sink_manager.h
++++ b/components/viz/test/test_frame_sink_manager.h
+@@ -96,6 +96,10 @@ class TestFrameSinkManagerImpl : public mojom::FrameSinkManager {
+   void StopThrottlingAllFrameSinks() override {}
+   void SetFrameBudgetInterval(const FrameSinkId& frame_sink_id,
+                               base::TimeDelta interval) override {}
++  void GetFrameBudgetStats(const FrameSinkId& frame_sink_id,
++                           GetFrameBudgetStatsCallback callback) override {
++    std::move(callback).Run(0, 0);
++  }
+   void ClearUnclaimedViewTransitionResources(
+       const blink::ViewTransitionToken& transition_token) override {}
+   void CreateMetricsRecorderForTest(
+diff --git a/content/browser/performance_manager/frame_rate_throttling.cc b/content/browser/performance_manager/frame_rate_throttling.cc
+index 5a7e1d77e3..c6ef4ac881 100644
+--- a/content/browser/performance_manager/frame_rate_throttling.cc
++++ b/content/browser/performance_manager/frame_rate_throttling.cc
+@@ -65,6 +65,17 @@ CONTENT_EXPORT void SetFrameBudgetForFrameSink(
+   GetHostFrameSinkManager()->SetFrameBudgetInterval(frame_sink_id, interval);
+ }
+ 
++void GetFrameBudgetStats(
++    const viz::FrameSinkId& frame_sink_id,
++    base::OnceCallback<void(uint64_t, uint64_t)> callback) {
++  if (!GetHostFrameSinkManager() || !frame_sink_id.is_valid()) {
++    std::move(callback).Run(0, 0);
++    return;
++  }
++  GetHostFrameSinkManager()->GetFrameBudgetStats(frame_sink_id,
++                                                  std::move(callback));
++}
++
+ void SetFrameBudgetDeviceScaleFactor(RenderWidgetHost* widget,
+                                      float device_scale_factor) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+diff --git a/content/public/browser/frame_rate_throttling.h b/content/public/browser/frame_rate_throttling.h
+index 79c24148d3..4d1d6acd5a 100644
+--- a/content/public/browser/frame_rate_throttling.h
++++ b/content/public/browser/frame_rate_throttling.h
+@@ -7,6 +7,7 @@
+ 
+ #include <set>
+ 
++#include "base/functional/callback.h"
+ #include "base/time/time.h"
+ #include "content/common/content_export.h"
+ #include "content/public/browser/global_routing_id.h"
+@@ -76,6 +77,14 @@ CONTENT_EXPORT void SetFrameBudgetForFrameSink(
+ // up. Pages that size canvases by devicePixelRatio then draw fewer pixels. A
+ // non-positive value turns it off. This uses the same mechanism as DevTools
+ // device emulation and replaces any emulation DevTools has set on `widget`.
++// FrameBudget: reports frames drawn and BeginFrames skipped by throttling for
++// `frame_sink_id` and its descendants since they were created. Reports zeros
++// when viz is unavailable.
++CONTENT_EXPORT void GetFrameBudgetStats(
++    const viz::FrameSinkId& frame_sink_id,
++    base::OnceCallback<void(uint64_t drawn_frames, uint64_t skipped_frames)>
++        callback);
++
+ CONTENT_EXPORT void SetFrameBudgetDeviceScaleFactor(RenderWidgetHost* widget,
+                                                     float device_scale_factor);
+ 
+diff --git a/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom b/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
+index 84f9c71a33..329268cd23 100644
+--- a/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
++++ b/services/viz/privileged/mojom/compositing/frame_sink_manager.mojom
+@@ -227,6 +227,12 @@ interface FrameSinkManager {
+   SetFrameBudgetInterval(
+       FrameSinkId frame_sink_id, mojo_base.mojom.TimeDelta interval);
+ 
++  // FrameBudget: totals for |frame_sink_id| and all its descendant sinks since
++  // they were created: frames submitted, and BeginFrames a client asked for
++  // but did not get because of throttling.
++  GetFrameBudgetStats(FrameSinkId frame_sink_id)
++      => (uint64 drawn_frames, uint64 skipped_frames);
++
+   // Takes a snapshot of |surface_id| or a newer surface with the same
+   // FrameSinkId. The request will be queued up until such surface exists and is
+   // reachable from the root surface.
+-- 
+2.53.0
+

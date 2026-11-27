@@ -1,0 +1,142 @@
+From 0c8d60381419188c7e46ccc8526ece6559351312 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 04:07:54 +0900
+Subject: [PATCH] =?UTF-8?q?fix:=20IPv6=20=EC=A3=BC=EC=86=8C=20=EA=B7=9C?=
+ =?UTF-8?q?=EC=B9=99=EA=B3=BC=20=EC=98=81=EC=83=81=20=EC=9E=AC=EC=83=9D=20?=
+ =?UTF-8?q?=EC=88=98=20=EC=96=B4=EA=B8=8B=EB=82=A8=20=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- NormalizeHost가 포트를 떼려고 첫 ':'에서 잘라서, GURL이 넘기는 '[::1]'이
+  '['가 되고 대괄호 없는 '::1'은 빈 문자열이 되어 IPv6 규칙이 맞지 않았다.
+  '['로 시작하면 ']'까지 쓰고, 대괄호 없는 IPv6는 대괄호를 씌운다.
+- MediaWebContentsObserver::OnMediaMetadataChanged는 재생 중에도 알림 없이
+  has_video를 바꾸고, 정지 알림은 정지 순간의 has_video를 보낸다. 시작·정지의
+  has_video로 수를 세면 짝이 어긋나, 영상으로 시작해 영상 트랙이 빠진 뒤 멈추면
+  수가 1에 고정되어 그 탭의 제한이 계속 풀려 있었다. 플레이어 ID 집합으로
+  세고, 정지는 has_video와 관계없이 ID로 짝을 맞춘다.
+---
+ .../browser/ui/framebudget/framebudget_policy.cc | 16 +++++++++++++++-
+ .../browser/ui/framebudget/framebudget_policy.h  |  3 ++-
+ .../ui/framebudget/framebudget_tab_helper.cc     |  9 ++++-----
+ .../ui/framebudget/framebudget_tab_helper.h      |  7 ++++++-
+ 4 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index e49793f040..ff273e5005 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -11,6 +11,7 @@
+ #include "base/no_destructor.h"
+ #include "base/power_monitor/power_monitor.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/strings/strcat.h"
+ #include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+ #include "base/values.h"
+@@ -285,7 +286,20 @@ std::string NormalizeHost(std::string_view input) {
+       scheme != std::string_view::npos) {
+     host = host.substr(scheme + 3);
+   }
+-  host = host.substr(0, host.find_first_of("/?#:"));
++  // GURL keeps IPv6 literals in brackets ("[::1]"), so cut at the closing
++  // bracket rather than at the first ':', which would leave just "[".
++  if (host.starts_with('[')) {
++    const size_t end = host.find(']');
++    return end == std::string_view::npos
++               ? std::string()
++               : base::ToLowerASCII(host.substr(0, end + 1));
++  }
++  host = host.substr(0, host.find_first_of("/?#"));
++  // A bare IPv6 literal ("::1") has several colons; give it brackets.
++  if (std::ranges::count(host, ':') >= 2) {
++    return base::StrCat({"[", base::ToLowerASCII(host), "]"});
++  }
++  host = host.substr(0, host.find(':'));
+   while (host.ends_with('.')) {
+     host.remove_suffix(1);
+   }
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index e5e3f07d34..27fb81757f 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -137,7 +137,8 @@ std::string_view SourceId(Source source);
+ int ClampFps(int fps);
+ 
+ // Lower-cases `input` and strips a scheme, path and port, so that
+-// "https://Example.com/x" becomes "example.com". Returns an empty string if
++// "https://Example.com/x" becomes "example.com". IPv6 literals keep their
++// brackets, matching GURL::host(): "http://[::1]:80/" and "::1" become "[::1]". Returns an empty string if
+ // nothing usable is left.
+ std::string NormalizeHost(std::string_view input);
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index ed703a77c3..e9dde4e728 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -215,7 +215,7 @@ void FrameBudgetTabHelper::SaveAsSiteRule() {
+ 
+ framebudget::Decision FrameBudgetTabHelper::Decide() const {
+   return framebudget::Decide(*prefs(), host(), tab_override_fps_,
+-                             IsWindowActive(), playing_videos_ > 0, idle_);
++                             IsWindowActive(), !playing_videos_.empty(), idle_);
+ }
+ 
+ std::string FrameBudgetTabHelper::host() const {
+@@ -316,8 +316,7 @@ void FrameBudgetTabHelper::RenderWidgetHostDestroyed(
+ void FrameBudgetTabHelper::MediaStartedPlaying(
+     const MediaPlayerInfo& video_type,
+     const content::MediaPlayerId& id) {
+-  if (video_type.has_video) {
+-    ++playing_videos_;
++  if (video_type.has_video && playing_videos_.insert(id).second) {
+     Apply();
+   }
+ }
+@@ -326,8 +325,8 @@ void FrameBudgetTabHelper::MediaStoppedPlaying(
+     const MediaPlayerInfo& video_type,
+     const content::MediaPlayerId& id,
+     MediaStoppedReason reason) {
+-  if (video_type.has_video && playing_videos_ > 0) {
+-    --playing_videos_;
++  // Match the start by id, whatever has_video says now.
++  if (playing_videos_.erase(id)) {
+     Apply();
+   }
+ }
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 7d6035e1db..7c53106881 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -6,6 +6,7 @@
+ #define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_HELPER_H_
+ 
+ #include <map>
++#include <set>
+ #include <optional>
+ #include <string>
+ #include <vector>
+@@ -20,6 +21,7 @@
+ #include "components/prefs/pref_change_registrar.h"
+ #include "components/sessions/core/session_id.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
++#include "content/public/browser/media_player_id.h"
+ #include "content/public/browser/render_widget_host.h"
+ #include "content/public/browser/render_widget_host_observer.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -161,7 +163,10 @@ class FrameBudgetTabHelper
+   viz::FrameSinkId applied_frame_sink_id_;
+   base::TimeDelta applied_interval_;
+   bool applied_low_res_ = false;
+-  int playing_videos_ = 0;
++  // Players with video that are playing. Kept by id because a player's
++  // has_video can change while it plays without a notification, so a stop
++  // may report a different has_video than its start did.
++  std::set<content::MediaPlayerId> playing_videos_;
+   uint64_t drawn_frames_ = 0;
+   uint64_t skipped_frames_ = 0;
+   // The page the counts above belong to; a new page starts again at 0.
+-- 
+2.53.0
+

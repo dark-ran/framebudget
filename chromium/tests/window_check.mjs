@@ -277,7 +277,7 @@ function check(name, ok, data) {
 // ---- 3회차: 배터리 사용 중 기본값 ----
 {
   const b = await launch(['--framebudget-assume-battery', '--framebudget-battery-default-fps=20',
-                          '--framebudget-sites=localhost=30,sub.localhost=15', '--framebudget-low-res=127.0.0.1']);
+                          '--framebudget-sites=localhost=30,sub.localhost=15,[::1]=20', '--framebudget-low-res=127.0.0.1']);
   try {
     const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
     const pa = await attach(b, first.targetId, 0);
@@ -292,6 +292,10 @@ function check(name, ok, data) {
     await pa.goto(`http://sub.localhost:${port}/raf.html`);
     const rs = await pa.raf(2);
     check('18. 실행 옵션 규칙: 더 구체적인 sub.localhost=15가 이김', near(rs, 15), rs);
+    // IPv6 주소 규칙: GURL은 [::1]처럼 대괄호를 붙여 줍니다.
+    await pa.goto(`http://[::1]:${port}/raf.html`);
+    const r6 = await pa.raf(2);
+    check('19. IPv6 주소 규칙: [::1]=20', near(r6, 20), r6);
     await pa.goto(`${B}/raf.html`);
 
     // 저해상도 모드는 페이지가 보는 devicePixelRatio를 절반으로 낮춥니다.

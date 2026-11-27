@@ -256,6 +256,9 @@ function check(name, ok, data) {
     const [, drawnText = '0', skippedText = '0'] = savedRow.match(/([\d,]+) \/ ([\d,]+)/) || [];
     const drawn = Number(drawnText.replace(/,/g, '')), skipped = Number(skippedText.replace(/,/g, ''));
     check('13. 측정: 제한된 탭은 그린 프레임과 제한으로 건너뛴 프레임이 모두 0보다 큼', drawn > 0 && skipped > 0, {drawn, skipped});
+    const totals = await ui.eval(`[...document.querySelectorAll('#site-totals tr')].map(tr => [...tr.cells].map(c => c.innerText))`);
+    const site = totals.find(r => r[0] === '127.0.0.1');
+    check('17. 사이트별 누적: 127.0.0.1의 건너뛴 프레임이 0보다 큼', site && Number(site[2].replace(/,/g, '')) > 0, totals);
     const exportJson = () => ui.eval(`new Promise(r => { framebudget.onExport = r; chrome.send('exportSettings'); })`);
     const exported = JSON.parse(await exportJson());
     check('14. 내보내기: 기본값 30이 들어 있음', exported.default_fps === 30, exported.default_fps);

@@ -1,0 +1,254 @@
+From e8ac1f02f1756f882eb911e4a785fb08095720ef Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 12:01:19 +0900
+Subject: [PATCH 1/2] =?UTF-8?q?chrome:=20=ED=83=AD=20=EC=9A=B0=ED=81=B4?=
+ =?UTF-8?q?=EB=A6=AD=20=EB=A9=94=EB=89=B4=EC=97=90=EC=84=9C=20=ED=83=AD?=
+ =?UTF-8?q?=EC=9D=98=20FPS=20=EA=B3=A0=EB=A5=B4=EA=B8=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+탭 우클릭 메뉴에 'FrameBudget FPS' 하위 메뉴를 넣어 규칙 따름, 제한 없음,
+60/30/15/5 FPS를 고른다. 하위 메뉴 항목은 FrameBudgetTabMenuModel이 직접
+처리하고, 탭 메뉴 enum에는 하위 메뉴 자리(CommandFrameBudget)만 더한다.
+views는 메뉴 전체에서 명령 번호로 항목을 찾으므로, 다른 하위 메뉴(1000~1999)와
+겹치지 않게 2101번부터 쓴다. 처음 0~5번을 썼을 때 1번(새로고침)의 단축키가
+붙고 선택 표시가 나오지 않았다.
+---
+ chrome/browser/ui/framebudget/BUILD.gn        |  3 +
+ .../framebudget/framebudget_tab_menu_model.cc | 76 +++++++++++++++++++
+ .../framebudget/framebudget_tab_menu_model.h  | 33 ++++++++
+ chrome/browser/ui/tabs/tab_menu_model.cc      | 12 +++
+ chrome/browser/ui/tabs/tab_menu_model.h       |  1 +
+ chrome/browser/ui/tabs/tab_strip_model.cc     |  7 ++
+ .../tabs/public/tab_context_menu_command.h    |  3 +
+ 7 files changed, 135 insertions(+)
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_tab_menu_model.cc
+ create mode 100644 chrome/browser/ui/framebudget/framebudget_tab_menu_model.h
+
+diff --git a/chrome/browser/ui/framebudget/BUILD.gn b/chrome/browser/ui/framebudget/BUILD.gn
+index 48594ff671..83b09a70c2 100644
+--- a/chrome/browser/ui/framebudget/BUILD.gn
++++ b/chrome/browser/ui/framebudget/BUILD.gn
+@@ -22,6 +22,8 @@ source_set("framebudget") {
+   sources = [
+     "framebudget_tab_helper.cc",
+     "framebudget_tab_helper.h",
++    "framebudget_tab_menu_model.cc",
++    "framebudget_tab_menu_model.h",
+   ]
+   public_deps = [
+     ":policy",
+@@ -39,6 +41,7 @@ source_set("framebudget") {
+     "//components/user_prefs",
+     "//third_party/blink/public/common:headers",
+     "//ui/events:events_base",
++    "//ui/menus",
+     "//url",
+   ]
+ }
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_menu_model.cc b/chrome/browser/ui/framebudget/framebudget_tab_menu_model.cc
+new file mode 100644
+index 0000000000..d421fe63a6
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_tab_menu_model.cc
+@@ -0,0 +1,76 @@
++// Copyright 2026 WieHyunSeo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/framebudget/framebudget_tab_menu_model.h"
++
++#include <array>
++#include <optional>
++
++#include "base/strings/string_number_conversions.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
++#include "content/public/browser/web_contents.h"
++
++namespace {
++
++// -1 follows the rules, 0 means no limit.
++constexpr std::array<int, 6> kChoices = {-1, 0, 60, 30, 15, 5};
++constexpr int kRadioGroup = 0;
++// Command ids must not collide with the rest of the tab menu: views looks
++// items up by id across the whole menu, so a shared id would check, label and
++// run the parent's command instead (e.g. 1 is Reload). Other tab submenus use
++// 1000-1999.
++constexpr int kFirstCommandId = 2101;
++
++// The choice for `command_id`, or nullopt if it is not one of ours.
++std::optional<int> ChoiceFor(int command_id) {
++  const int index = command_id - kFirstCommandId;
++  if (index < 0 || index >= static_cast<int>(kChoices.size())) {
++    return std::nullopt;
++  }
++  return kChoices[index];
++}
++
++std::u16string Label(int fps) {
++  if (fps < 0) {
++    return u"규칙 따름";
++  }
++  return fps == 0 ? u"제한 없음" : base::NumberToString16(fps) + u" FPS";
++}
++
++}  // namespace
++
++FrameBudgetTabMenuModel::FrameBudgetTabMenuModel(
++    content::WebContents* web_contents)
++    : ui::SimpleMenuModel(this), web_contents_(web_contents->GetWeakPtr()) {
++  for (size_t i = 0; i < kChoices.size(); ++i) {
++    AddRadioItem(kFirstCommandId + static_cast<int>(i), Label(kChoices[i]),
++                 kRadioGroup);
++  }
++}
++
++FrameBudgetTabMenuModel::~FrameBudgetTabMenuModel() = default;
++
++bool FrameBudgetTabMenuModel::IsCommandIdChecked(int command_id) const {
++  FrameBudgetTabHelper* helper =
++      web_contents_ ? FrameBudgetTabHelper::FromWebContents(web_contents_.get())
++                    : nullptr;
++  const std::optional<int> choice = ChoiceFor(command_id);
++  if (!helper || !choice) {
++    return false;
++  }
++  const std::optional<int> fps = helper->tab_override();
++  return *choice < 0 ? !fps.has_value() : fps == *choice;
++}
++
++void FrameBudgetTabMenuModel::ExecuteCommand(int command_id, int event_flags) {
++  if (FrameBudgetTabHelper* helper =
++          web_contents_
++              ? FrameBudgetTabHelper::FromWebContents(web_contents_.get())
++              : nullptr) {
++    if (const std::optional<int> choice = ChoiceFor(command_id)) {
++      helper->SetTabOverride(*choice < 0 ? std::nullopt
++                                         : std::optional<int>(*choice));
++    }
++  }
++}
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_menu_model.h b/chrome/browser/ui/framebudget/framebudget_tab_menu_model.h
+new file mode 100644
+index 0000000000..ba79a540ab
+--- /dev/null
++++ b/chrome/browser/ui/framebudget/framebudget_tab_menu_model.h
+@@ -0,0 +1,33 @@
++// Copyright 2026 WieHyunSeo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_MENU_MODEL_H_
++#define CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_MENU_MODEL_H_
++
++#include "base/memory/weak_ptr.h"
++#include "ui/menus/simple_menu_model.h"
++
++namespace content {
++class WebContents;
++}
++
++// "FrameBudget FPS" submenu of the tab context menu: picks the tab's own FPS,
++// like Alt+Shift+F or the "이 탭만" column on chrome://framebudget.
++class FrameBudgetTabMenuModel : public ui::SimpleMenuModel,
++                                public ui::SimpleMenuModel::Delegate {
++ public:
++  explicit FrameBudgetTabMenuModel(content::WebContents* web_contents);
++  FrameBudgetTabMenuModel(const FrameBudgetTabMenuModel&) = delete;
++  FrameBudgetTabMenuModel& operator=(const FrameBudgetTabMenuModel&) = delete;
++  ~FrameBudgetTabMenuModel() override;
++
++  // ui::SimpleMenuModel::Delegate:
++  bool IsCommandIdChecked(int command_id) const override;
++  void ExecuteCommand(int command_id, int event_flags) override;
++
++ private:
++  base::WeakPtr<content::WebContents> web_contents_;
++};
++
++#endif  // CHROME_BROWSER_UI_FRAMEBUDGET_FRAMEBUDGET_TAB_MENU_MODEL_H_
+diff --git a/chrome/browser/ui/tabs/tab_menu_model.cc b/chrome/browser/ui/tabs/tab_menu_model.cc
+index 17ab4e685b..5bd26b8455 100644
+--- a/chrome/browser/ui/tabs/tab_menu_model.cc
++++ b/chrome/browser/ui/tabs/tab_menu_model.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "chrome/browser/ui/tabs/tab_menu_model.h"
+ 
++#include "chrome/browser/ui/framebudget/framebudget_tab_helper.h"
++#include "chrome/browser/ui/framebudget/framebudget_tab_menu_model.h"
++
+ #include <memory>
+ #include <optional>
+ 
+@@ -505,6 +508,15 @@ void TabMenuModel::Build(int index) {
+   AddSeparator(ui::NORMAL_SEPARATOR);
+   AddItemWithStringId(TabStripModel::CommandReload, IDS_TAB_CXMENU_RELOAD);
+ 
++  // FrameBudget: the tab's own FPS, for the right-clicked tab only.
++  if (content::WebContents* contents = tab_strip_->GetWebContentsAt(index);
++      num_tabs == 1 && contents &&
++      FrameBudgetTabHelper::FromWebContents(contents)) {
++    framebudget_submenu_ = std::make_unique<FrameBudgetTabMenuModel>(contents);
++    AddSubMenu(TabStripModel::CommandFrameBudget, u"FrameBudget FPS",
++               framebudget_submenu_.get());
++  }
++
+   AddItemWithStringId(TabStripModel::CommandDuplicate,
+                       IDS_TAB_CXMENU_DUPLICATE);
+   SetElementIdentifierAt(GetItemCount() - 1, kDuplicateMenuItem);
+diff --git a/chrome/browser/ui/tabs/tab_menu_model.h b/chrome/browser/ui/tabs/tab_menu_model.h
+index 1748478c11..5af738c2c7 100644
+--- a/chrome/browser/ui/tabs/tab_menu_model.h
++++ b/chrome/browser/ui/tabs/tab_menu_model.h
+@@ -105,6 +105,7 @@ class TabMenuModel : public ui::SimpleMenuModel {
+   std::unique_ptr<ui::SimpleMenuModel> arrange_split_view_submenu_;
+   std::unique_ptr<ui::SimpleMenuModel> glic_tab_sub_menu_model_;
+   std::unique_ptr<ui::SimpleMenuModel> send_tab_to_self_submenu_;
++  std::unique_ptr<ui::SimpleMenuModel> framebudget_submenu_;
+   std::unique_ptr<send_tab_to_self::SendTabToSelfContextMenuDelegate>
+       send_tab_to_self_submenu_delegate_;
+ 
+diff --git a/chrome/browser/ui/tabs/tab_strip_model.cc b/chrome/browser/ui/tabs/tab_strip_model.cc
+index e03b98f928..5a885cc88e 100644
+--- a/chrome/browser/ui/tabs/tab_strip_model.cc
++++ b/chrome/browser/ui/tabs/tab_strip_model.cc
+@@ -2781,6 +2781,9 @@ bool TabStripModel::IsContextMenuCommandEnabled(
+ 
+     case CommandToggleVertical:
+       return true;
++
++    case CommandFrameBudget:
++      return true;
+   }
+   SCOPED_CRASH_KEY_NUMBER("TabStripModel", "command_id", command_id);
+   NOTREACHED() << "Unsupported command: " << command_id;
+@@ -3188,6 +3191,10 @@ void TabStripModel::ExecuteContextMenuCommand(int context_index,
+                               /*delete_groups=*/true);
+       break;
+     }
++    case CommandFrameBudget:
++      // A submenu; FrameBudgetTabMenuModel handles its items.
++      break;
++
+     case CommandToggleVertical: {
+       base::UmaHistogramCounts1000(
+           "Tab.ContextMenu.ToggleVertical.SelectedTabsCount",
+diff --git a/components/tabs/public/tab_context_menu_command.h b/components/tabs/public/tab_context_menu_command.h
+index 0ed448fdc4..6ec79a253b 100644
+--- a/components/tabs/public/tab_context_menu_command.h
++++ b/components/tabs/public/tab_context_menu_command.h
+@@ -39,6 +39,9 @@ enum TabContextMenuCommand {
+   CommandGlicSwitchToRecentConversation,
+   CommandGlicUnshare,
+   CommandToggleFocusGroup,
++  // FrameBudget: the "FrameBudget FPS" submenu. Its items are handled by
++  // FrameBudgetTabMenuModel, so this id itself is never executed.
++  CommandFrameBudget,
+ };
+ // LINT.ThenChange(//tools/metrics/histograms/metadata/tab/histograms.xml:TabContextMenuCommand)
+ 
+-- 
+2.53.0
+

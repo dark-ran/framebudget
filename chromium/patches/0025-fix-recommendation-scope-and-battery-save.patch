@@ -1,0 +1,97 @@
+From bef2e13c979fb0a12858f951d6a8889ad77500f3 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 04:17:22 +0900
+Subject: [PATCH 2/2] =?UTF-8?q?fix:=20=EC=A0=9C=ED=95=9C=20=EC=B6=94?=
+ =?UTF-8?q?=EC=B2=9C=20=EB=8C=80=EC=83=81=EA=B3=BC=20=EA=B7=9C=EC=B9=99=20?=
+ =?UTF-8?q?=EC=A0=80=EC=9E=A5=EC=9D=98=20=EB=B0=B0=ED=84=B0=EB=A6=AC=20?=
+ =?UTF-8?q?=EA=B0=92=20=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 추천이 fps 0인 탭을 모두 대상으로 해서, 일부러 '제한 없음'으로 정한
+  사이트와 영상 재생 중이라 풀린 탭에도 제한을 추천했다. 사이트 규칙 없이
+  기본값을 쓰는 탭만 추천한다.
+- 탭 고정값 없이 '이 사이트 규칙으로 저장'을 누르면 배터리 기본값이 규칙이
+  되었다. 이 경우 배터리가 아닐 때의 기본값을 저장한다.
+---
+ .../browser/ui/framebudget/framebudget_policy.cc   |  5 +++++
+ chrome/browser/ui/framebudget/framebudget_policy.h |  3 +++
+ .../ui/framebudget/framebudget_tab_helper.cc       | 14 +++++++++++---
+ chrome/browser/ui/framebudget/framebudget_ui.cc    |  5 ++++-
+ 4 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index ff273e5005..eab02806b7 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -131,6 +131,11 @@ bool OnBattery() {
+   return monitor->IsInitialized() && monitor->IsOnBatteryPower();
+ }
+ 
++int NormalDefaultFps(const PrefService& prefs) {
++  return GetCommandLineConfig().default_fps.value_or(
++      ClampFps(prefs.GetInteger(kDefaultFpsPref)));
++}
++
+ namespace {
+ 
+ Decision DecideIgnoringWindow(const PrefService& prefs,
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 27fb81757f..63cc5293cd 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -124,6 +124,9 @@ base::TimeDelta IdleTimeout();
+ // Whether the battery default applies now.
+ bool OnBattery();
+ 
++// The default for sites without a rule when not on battery.
++int NormalDefaultFps(const PrefService& prefs);
++
+ // Whether user input may briefly lift the limit of a tab showing `host`.
+ bool InputBoostAllowed(const PrefService& prefs, std::string_view host);
+ 
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index e9dde4e728..8665676534 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -205,9 +205,17 @@ void FrameBudgetTabHelper::SaveAsSiteRule() {
+     return;
+   }
+   // Save the tab's own choice, not a temporary state such as an inactive
+-  // window, idle time or video playback.
+-  const int fps = tab_override_fps_.value_or(
+-      framebudget::Decide(*prefs(), site, std::nullopt).fps);
++  // window, idle time, video playback or battery power.
++  int fps;
++  if (tab_override_fps_) {
++    fps = *tab_override_fps_;
++  } else {
++    const framebudget::Decision decision =
++        framebudget::Decide(*prefs(), site, std::nullopt);
++    fps = decision.source == framebudget::Source::kBatteryDefault
++              ? framebudget::NormalDefaultFps(*prefs())
++              : decision.fps;
++  }
+   ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)->Set(site, fps);
+   // The saved rule now gives the same FPS, so the override is redundant.
+   SetTabOverride(std::nullopt);
+diff --git a/chrome/browser/ui/framebudget/framebudget_ui.cc b/chrome/browser/ui/framebudget/framebudget_ui.cc
+index 4fc3afa4a2..1e28edbe9d 100644
+--- a/chrome/browser/ui/framebudget/framebudget_ui.cc
++++ b/chrome/browser/ui/framebudget/framebudget_ui.cc
+@@ -286,7 +286,10 @@ function renderRecommendations(state) {
+   const box = $('recommend');
+   box.replaceChildren();
+   for (const tab of state.tabs) {
+-    const eligible = tab.fps === 0 && !tab.hasOverride && !tab.boosted && tab.host;
++    // Only tabs that run unlimited because no rule covers them: not a site
++    // set to "no limit" on purpose, and not a tab lifted for video.
++    const eligible = tab.fps === 0 && !tab.boosted && tab.host &&
++        ['default', 'cmdline-default', 'battery-default'].includes(tab.source);
+     const samples = eligible ? (history.get(tab.id) || []) : [];
+     if (eligible) samples.push({drawn: tab.drawnFrames, time: now});
+     // Keep a little more than the window; a new page restarts the counts.
+-- 
+2.53.0
+

@@ -374,6 +374,27 @@ function check(name, ok, data) {
   }
 }
 
+// ---- 7회차: GPU 프로세스가 다시 시작될 때 ----
+{
+  const b = await launch(['--framebudget-sites=127.0.0.1=15']);
+  try {
+    const first = (await b.send('Target.getTargets')).targetInfos.find(t => t.type === 'page');
+    const pa = await attach(b, first.targetId, 0);
+    await pa.goto(`${A}/raf.html`);
+    const gpuPids = async () => ((await b.send('SystemInfo.getProcessInfo')).processInfo || [])
+        .filter(p => p.type === 'GPU').map(p => p.id);
+    const before = await gpuPids();
+    for (const pid of before) process.kill(pid, 'SIGKILL');
+    await sleep(5000);
+    const after = await gpuPids();
+    const r = await pa.raf(2);
+    check('20. GPU 프로세스가 다시 시작돼도 15 유지', after.length > 0 && !after.some(p => before.includes(p)) && near(r, 15),
+          {before, after, raf: r});
+  } finally {
+    await b.close();
+  }
+}
+
 server.close();
 const failed = results.filter(ok => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} 통과`);

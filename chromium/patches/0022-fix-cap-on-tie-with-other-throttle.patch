@@ -1,0 +1,37 @@
+From a4420620555839719b3ec8674515e1234d4a0243 Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 03:59:48 +0900
+Subject: [PATCH 2/2] =?UTF-8?q?fix:=20FrameBudget=20=EA=B0=84=EA=B2=A9?=
+ =?UTF-8?q?=EC=9D=B4=20=EB=8B=A4=EB=A5=B8=20=EC=A0=9C=ED=95=9C=EA=B3=BC=20?=
+ =?UTF-8?q?=EA=B0=99=EC=9D=84=20=EB=95=8C=EB=8F=84=20=EC=83=81=ED=95=9C?=
+ =?UTF-8?q?=EC=9C=BC=EB=A1=9C=20=EC=A7=80=ED=82=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FrameBudget 간격이 에너지 세이버 같은 다른 제한과 정확히 같으면 상한 판정이
+꺼져 vsync 반올림으로 돌아갔다(100Hz에서 30FPS가 33FPS). 같을 때도 상한으로
+본다.
+---
+ .../viz/service/frame_sinks/frame_sink_manager_impl.cc       | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index abb9a446a0..2cbfc484c8 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -1375,8 +1375,9 @@ void FrameSinkManagerImpl::ApplyThrottlingRules(
+                                           ? throttle_interval_
+                                           : global_throttle;
+       support->SetThrottleInterval(std::max(budget, current));
+-      // The budget is a cap only when it, not another throttle, sets the rate.
+-      support->SetThrottleIntervalIsCap(budget > current);
++      // The budget is a cap whenever it sets the rate, including a tie with
++      // another throttle; otherwise viz would round it to the nearest vsync.
++      support->SetThrottleIntervalIsCap(budget >= current);
+     }
+   }
+ 
+-- 
+2.53.0
+

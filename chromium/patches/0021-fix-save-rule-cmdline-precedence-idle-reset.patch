@@ -1,0 +1,143 @@
+From bfa95e944b7dd9f7d089d5675316ca1d05845f3d Mon Sep 17 00:00:00 2001
+From: dark-ran <74461793+dark-ran@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 03:59:48 +0900
+Subject: [PATCH 1/2] =?UTF-8?q?fix:=20=EA=B7=9C=EC=B9=99=20=EC=A0=80?=
+ =?UTF-8?q?=EC=9E=A5=C2=B7=EC=8B=A4=ED=96=89=20=EC=98=B5=EC=85=98=20?=
+ =?UTF-8?q?=EC=9A=B0=EC=84=A0=EC=88=9C=EC=9C=84=C2=B7=EC=9E=85=EB=A0=A5=20?=
+ =?UTF-8?q?=EC=97=86=EC=9D=8C=20=ED=95=B4=EC=A0=9C=EC=9D=98=20=EB=85=BC?=
+ =?UTF-8?q?=EB=A6=AC=20=EC=98=A4=EB=A5=98=20=EC=88=98=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- '이 사이트 규칙으로 저장'이 지금 적용 중인 값을 저장해서, 비활성 창(설정
+  화면을 다른 창에서 열면 그렇게 된다)·입력 없음·영상 재생·배터리 같은 일시적
+  상태가 규칙이 되었다. 탭 고정값을, 없으면 일시적 조건을 뺀 값을 저장한다.
+- 실행 옵션 사이트 규칙만 먼저 쓴 것이 이겨서 저장된 규칙(가장 구체적인
+  도메인)과 달랐다. 실행 옵션도 가장 구체적인 도메인이 이긴다.
+- 뒤에 있던 탭으로 Ctrl+Tab 등으로 돌아오거나 창을 활성화해도 마우스를
+  움직이기 전까지 입력 없음 FPS로 남았다. 탭이 보이게 되거나 창이 활성화되면
+  입력이 있었던 것으로 본다.
+---
+ .../ui/framebudget/framebudget_policy.cc      | 12 ++++++---
+ .../ui/framebudget/framebudget_policy.h       |  2 +-
+ .../ui/framebudget/framebudget_tab_helper.cc  | 25 ++++++++++++++++---
+ .../ui/framebudget/framebudget_tab_helper.h   |  3 +++
+ 4 files changed, 35 insertions(+), 7 deletions(-)
+
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.cc b/chrome/browser/ui/framebudget/framebudget_policy.cc
+index 5f9429e0f5..e49793f040 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.cc
++++ b/chrome/browser/ui/framebudget/framebudget_policy.cc
+@@ -139,12 +139,18 @@ Decision DecideIgnoringWindow(const PrefService& prefs,
+     return {ClampFps(*tab_override), Source::kTabOverride, ""};
+   }
+ 
++  // Like saved rules, the most specific matching domain wins.
+   const CommandLineConfig& command_line = GetCommandLineConfig();
+-  for (const auto& [site, fps] : command_line.sites) {
+-    if (HostMatches(host, site)) {
+-      return {fps, Source::kCommandLineSite, site};
++  const std::pair<std::string, int>* best = nullptr;
++  for (const auto& rule : command_line.sites) {
++    if (HostMatches(host, rule.first) &&
++        (!best || rule.first.size() > best->first.size())) {
++      best = &rule;
+     }
+   }
++  if (best) {
++    return {best->second, Source::kCommandLineSite, best->first};
++  }
+ 
+   // Among saved rules the most specific domain wins.
+   const base::DictValue& saved = prefs.GetDict(kSitesPref);
+diff --git a/chrome/browser/ui/framebudget/framebudget_policy.h b/chrome/browser/ui/framebudget/framebudget_policy.h
+index 7c168bcf09..e5e3f07d34 100644
+--- a/chrome/browser/ui/framebudget/framebudget_policy.h
++++ b/chrome/browser/ui/framebudget/framebudget_policy.h
+@@ -70,7 +70,7 @@ struct CommandLineConfig {
+   ~CommandLineConfig();
+ 
+   std::optional<int> default_fps;
+-  // (host, fps) in command line order. The first match wins.
++  // (host, fps). The most specific matching host wins.
+   std::vector<std::pair<std::string, int>> sites;
+   // Hosts where input never lifts the limit.
+   std::vector<std::string> no_input_boost_sites;
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+index eeee1e6cc1..ed703a77c3 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.cc
+@@ -204,7 +204,10 @@ void FrameBudgetTabHelper::SaveAsSiteRule() {
+   if (site.empty()) {
+     return;
+   }
+-  const int fps = Decide().fps;
++  // Save the tab's own choice, not a temporary state such as an inactive
++  // window, idle time or video playback.
++  const int fps = tab_override_fps_.value_or(
++      framebudget::Decide(*prefs(), site, std::nullopt).fps);
+   ScopedDictPrefUpdate(prefs(), framebudget::kSitesPref)->Set(site, fps);
+   // The saved rule now gives the same FPS, so the override is redundant.
+   SetTabOverride(std::nullopt);
+@@ -235,8 +238,7 @@ void FrameBudgetTabHelper::RenderFrameHostChanged(
+ }
+ 
+ void FrameBudgetTabHelper::PrimaryPageChanged(content::Page& page) {
+-  idle_ = false;
+-  RestartIdleTimer();
++  ResetIdle();
+   Apply();
+ }
+ 
+@@ -433,9 +435,26 @@ void FrameBudgetTabHelper::OnTabInserted(tabs::TabInterface* tab) {
+ 
+ void FrameBudgetTabHelper::OnWindowActivationChanged(
+     BrowserWindowInterface* window) {
++  if (window->IsActive()) {
++    ResetIdle();
++  }
+   Apply();
+ }
+ 
++void FrameBudgetTabHelper::OnVisibilityChanged(content::Visibility visibility) {
++  // Coming back to a tab (e.g. Ctrl+Tab) is user activity even though the key
++  // press itself goes to the browser, not the page.
++  if (visibility == content::Visibility::VISIBLE) {
++    ResetIdle();
++    Apply();
++  }
++}
++
++void FrameBudgetTabHelper::ResetIdle() {
++  idle_ = false;
++  RestartIdleTimer();
++}
++
+ bool FrameBudgetTabHelper::IsWindowActive() const {
+   tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(
+       web_contents());
+diff --git a/chrome/browser/ui/framebudget/framebudget_tab_helper.h b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+index 07a1b04fb2..7d6035e1db 100644
+--- a/chrome/browser/ui/framebudget/framebudget_tab_helper.h
++++ b/chrome/browser/ui/framebudget/framebudget_tab_helper.h
+@@ -107,6 +107,7 @@ class FrameBudgetTabHelper
+   void PrimaryPageChanged(content::Page& page) override;
+   void PrimaryMainFrameRenderProcessGone(
+       base::TerminationStatus status) override;
++  void OnVisibilityChanged(content::Visibility visibility) override;
+   void MediaStartedPlaying(const MediaPlayerInfo& video_type,
+                            const content::MediaPlayerId& id) override;
+   void MediaStoppedPlaying(const MediaPlayerInfo& video_type,
+@@ -140,6 +141,8 @@ class FrameBudgetTabHelper
+   // Starts counting IdleTimeout() from now; OnIdle() runs when it ends.
+   void RestartIdleTimer();
+   void OnIdle();
++  // Treats now as user activity: leaves the idle state and restarts the timer.
++  void ResetIdle();
+ 
+   // Sends the tab's limit to viz when its frame sink or FPS has changed.
+   void Apply();
+-- 
+2.53.0
+
